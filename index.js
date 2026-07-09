@@ -3,6 +3,7 @@ const admin = require('firebase-admin');
 const TelegramBot = require('node-telegram-bot-api');
 const Tesseract = require('tesseract.js');
 const Jimp = require('jimp');
+const exifr = require('exifr');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -277,8 +278,19 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
   }
   
   let duplicateOrders = [];
+  let exifrWarning = '';
 
   if (imageBuffer) {
+    try {
+      const exifrData = await exifr.parse(imageBuffer).catch(() => null);
+      if (exifrData) {
+        const software = (exifrData.Software || exifrData.CreatorTool || exifrData.ProcessingSoftware || '').toLowerCase();
+        if (software.includes('photoshop') || software.includes('canva') || software.includes('picsart') || software.includes('illustrator') || software.includes('paint')) {
+          exifrWarning = `⚠️ ALERTA: Imagen posiblemente editada con ${exifrData.Software || exifrData.CreatorTool}`;
+        }
+      }
+    } catch(e) {}
+
     try {
       ocrResult = await performOCR(imageBuffer);
       if (ocrResult.length > 0) {
@@ -302,14 +314,14 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
     }
   }
 
-  await sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders);
+  await sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders, exifrWarning);
 }
 
 // ========================================
 // 6. ENVIAR A TELEGRAM
 // ========================================
 
-async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders = []) {
+async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders = [], exifrWarning = '') {
   const storeConfig = bots[storeName];
   if (!storeConfig || !storeConfig.bot || !storeConfig.chatId) {
     console.error(`❌ Faltan datos de Telegram para ${storeName}`);
@@ -336,6 +348,10 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
   
   if (duplicateOrders.length > 0) {
     msg += `🚨 <b>¡ALERTA DE FRAUDE!</b> Esta referencia ya fue usada en: <b>${duplicateOrders.join(', ')}</b>\n`;
+  }
+
+  if (exifrWarning !== '') {
+    msg += `🚨 <b>¡ALERTA EXIF!</b> ${exifrWarning}\n`;
   }
 
   msg += `🏦 <b>Método:</b> ${order.paymentMethodName || 'Desconocido'}\n`;
@@ -423,7 +439,76 @@ Object.keys(bots).forEach(storeName => {
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
 
-    if (!data.startsWith('approve_') && !data.startsWith('reject_')) return;
+    if (!data.startsWith('approve_') && !data.startsWith('reject_') && !data.startsWith('rejectreason_') && !data.startsWith('cancelreject_')) return;
+
+    // Manejar cancelar rechazo
+    if (data.startsWith('cancelreject_')) {
+        const orderId = data.replace('cancelreject_', '');
+        const newMarkup = {
+          inline_keyboard: [
+             [
+               { text: '✅ Aprobar', callback_data: `approve_${orderId}` },
+               { text: '❌ Rechazar', callback_data: `reject_${orderId}` }
+             ],
+             [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+          ]
+        };
+        await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+        await botConfig.bot.answerCallbackQuery(query.id, { text: 'Operación cancelada.' });
+        return;
+    }
+
+    // Manejar motivos de rechazo específicos
+    if (data.startsWith('rejectreason_')) {
+        const parts = data.split('_');
+        const orderId = parts[1];
+        const reasonCode = parts[2];
+        const appInstance = storeApps[storeName];
+        
+        let rejectMsg = 'Pedido rechazado';
+        if (reasonCode === 'monto') rejectMsg = '💰 Monto Incompleto';
+        else if (reasonCode === 'duplicado') rejectMsg = '⚠️ Pago duplicado';
+        else if (reasonCode === 'general') rejectMsg = '🚫 Pedido rechazado';
+
+        try {
+          const dbRef = appInstance.database().ref('orders/' + orderId);
+          const snap = await dbRef.once('value');
+          const orderData = snap.val();
+          
+          if (!orderData || orderData.status !== 'pending') {
+            await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado.', show_alert: true });
+            return;
+          }
+
+          const statusHistory = orderData.statusHistory || [];
+          statusHistory.push({
+            status: 'rejected',
+            timestamp: new Date().toISOString(),
+            note: rejectMsg
+          });
+
+          await dbRef.update({
+             status: 'rejected',
+             adminNote: rejectMsg,
+             rejectReason: rejectMsg,
+             updatedAt: new Date().toISOString(),
+             statusHistory: statusHistory
+          });
+          
+          const newMarkup = {
+            inline_keyboard: [
+               [{ text: `❌ ${rejectMsg.toUpperCase()}`, callback_data: 'noop' }],
+               [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+            ]
+          };
+          await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+          await botConfig.bot.answerCallbackQuery(query.id, { text: 'Pedido rechazado y cliente notificado.' });
+          console.log(`❌ [${storeName}] Pedido #${orderId} RECHAZADO: ${rejectMsg}`);
+        } catch(e) {
+          console.error(e);
+        }
+        return;
+    }
 
     const action = data.split('_')[0]; // "approve" o "reject"
     const orderId = data.substring(action.length + 1); // Extraer el ID
@@ -489,28 +574,16 @@ Object.keys(bots).forEach(storeName => {
         await botConfig.bot.answerCallbackQuery(query.id, { text: `Resultado: ${buttonText}` });
         console.log(`✅ [${storeName}] Pedido #${orderId} procesado desde Telegram: ${buttonText}`);
       } else if (action === 'reject') {
-        const statusHistory = orderData.statusHistory || [];
-        statusHistory.push({
-          status: 'rejected',
-          timestamp: new Date().toISOString(),
-          note: 'Pedido rechazado'
-        });
-
-        await dbRef.update({
-           status: 'rejected',
-           adminNote: 'Pedido rechazado',
-           updatedAt: new Date().toISOString(),
-           statusHistory: statusHistory
-        });
         const newMarkup = {
           inline_keyboard: [
-             [{ text: '❌ PEDIDO RECHAZADO', callback_data: 'noop' }],
-             [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+            [{ text: '💰 Monto Incompleto', callback_data: `rejectreason_${orderId}_monto` }],
+            [{ text: '⚠️ Pago duplicado', callback_data: `rejectreason_${orderId}_duplicado` }],
+            [{ text: '🚫 Pedido rechazado', callback_data: `rejectreason_${orderId}_general` }],
+            [{ text: '🔙 Cancelar', callback_data: `cancelreject_${orderId}` }]
           ]
         };
         await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
-        await botConfig.bot.answerCallbackQuery(query.id, { text: 'Pedido rechazado en la base de datos.' });
-        console.log(`❌ [${storeName}] Pedido #${orderId} RECHAZADO desde Telegram.`);
+        await botConfig.bot.answerCallbackQuery(query.id, { text: 'Selecciona el motivo del rechazo:' });
       }
     } catch (e) {
       console.error(`Error procesando callback para ${orderId}:`, e);
