@@ -71,8 +71,8 @@ const bots = {
     adminUrl: 'https://candystore-zeta.vercel.app/admin'
   },
   RecargaShark: {
-    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN, { polling: true }),
-    chatId: process.env.RECARGASHARK_CHAT_ID,
+    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { polling: true }),
+    chatId: process.env.RECARGASHARK_CHAT_ID || '6012452103',
     emoji: '🦈',
     adminUrl: 'https://admin.recargashark.com/admin'
   },
