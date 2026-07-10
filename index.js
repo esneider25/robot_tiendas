@@ -839,7 +839,13 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
               if (errorLower.includes('ya fue usado') || errorLower.includes('already used')) {
                 await updateOrderAndTelegram(dbRef, 'completed', `Aprobado forzadamente (API indicó: ${errorMsg})`, '✅ APROBADO (Ya usado)', botConfig, chatId, messageId, storeName, orderId);
               } else {
-                await updateOrderAndTelegram(dbRef, 'invalid-id', `Verifica que el ID o la cuenta sean correctos. Error: ${errorMsg}`, `❌ RECHAZADO API: ${errorMsg}`, botConfig, chatId, messageId, storeName, orderId);
+                let clientNote = 'ID Inválido o producto no disponible';
+                if (errorLower.includes('saldo') || errorLower.includes('balance') || errorLower.includes('pin') || errorLower.includes('stock')) {
+                    clientNote = 'Error temporal en el servidor. Por favor, contacta a soporte.';
+                } else if (errorLower.includes('id') || errorLower.includes('cuenta') || errorLower.includes('jugador') || errorLower.includes('not found')) {
+                    clientNote = 'Verifica que el ID o la cuenta sean correctos.';
+                }
+                await updateOrderAndTelegram(dbRef, 'invalid-id', clientNote, `❌ RECHAZADO API: ${errorMsg}`, botConfig, chatId, messageId, storeName, orderId);
               }
             }
           } catch (e) {
