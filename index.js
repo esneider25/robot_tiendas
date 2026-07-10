@@ -646,6 +646,10 @@ Object.keys(bots).forEach(storeName => {
         await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
         await botConfig.bot.answerCallbackQuery(query.id, { text: `Resultado: ${buttonText}` });
         console.log(`✅ [${storeName}] Pedido #${orderId} procesado desde Telegram: ${buttonText}`);
+        
+        if (newStatus === 'processing') {
+            pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId);
+        }
       } else if (action === 'reject') {
         const newMarkup = {
           inline_keyboard: [
@@ -748,6 +752,119 @@ async function processApiTopupFromTelegram(order, appInstance) {
     req.write(JSON.stringify(payload));
     req.end();
   });
+}
+
+async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, botConfig, chatId, messageId, storeName, orderId) {
+    const snap = await dbRef.once('value');
+    const orderData = snap.val();
+    if (!orderData) return;
+    const statusHistory = orderData.statusHistory || [];
+    statusHistory.push({
+        status: newStatus,
+        timestamp: new Date().toISOString(),
+        note: adminNote
+    });
+
+    await dbRef.update({
+        status: newStatus,
+        adminNote: adminNote,
+        updatedAt: new Date().toISOString(),
+        statusHistory: statusHistory
+    });
+
+    const newMarkup = {
+        inline_keyboard: [
+            [{ text: buttonText, callback_data: 'noop' }],
+            [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+        ]
+    };
+    try {
+        await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+        console.log(`✅ [${storeName}] Pedido #${orderId} actualizado tras polling: ${buttonText}`);
+    } catch(e) {
+        console.error(`❌ [${storeName}] Error editando msj en polling para #${orderId}`, e.message);
+    }
+}
+
+async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId) {
+  const apiConfigsSnap = await appInstance.database().ref('api_configs').once('value');
+  const apiConfigs = apiConfigsSnap.val() || [];
+  const apiIdx = parseInt(orderData.apiProvider);
+  if (isNaN(apiIdx) || !apiConfigs[apiIdx]) return;
+  const api = apiConfigs[apiIdx];
+  const baseUrl = api.baseUrl.endsWith('/') ? api.baseUrl.slice(0, -1) : api.baseUrl;
+  const botConfig = bots[storeName];
+
+  const rectificationCount = (orderData.statusHistory || []).filter(h => h.note && h.note.includes('rectificó')).length;
+  const finalMerchantRef = rectificationCount > 0 ? `${orderId}_R${rectificationCount}` : orderId;
+
+  let attempts = 0;
+  const maxAttempts = 12; // 12 * 5 = 60 seconds
+  const dbRef = appInstance.database().ref('orders/' + orderId);
+
+  const pollInterval = setInterval(async () => {
+    attempts++;
+    try {
+      const url = new URL(`${baseUrl}/recargas/status?merchant_ref=${finalMerchantRef}`);
+      const options = {
+        method: 'GET',
+        headers: { 'X-API-Key': api.apiKey || '' }
+      };
+
+      const req = https.request(url, options, (res) => {
+        let dataStr = '';
+        res.on('data', chunk => dataStr += chunk);
+        res.on('end', async () => {
+          try {
+            const pollData = JSON.parse(dataStr);
+            const estadoStr = String(pollData.estado || pollData.status || '').toLowerCase();
+            
+            if (pollData.ok && (estadoStr === 'completado' || estadoStr === 'completed')) {
+              clearInterval(pollInterval);
+              let note = 'Aprobado y entregado automáticamente (luego de procesar)';
+              if (pollData.codigo) note = 'Código entregado: ' + pollData.codigo;
+              if (pollData.codigos && pollData.codigos.length > 0) note = 'Códigos entregados:\n' + pollData.codigos.join('\n');
+              
+              await updateOrderAndTelegram(dbRef, 'completed', note, '✅ APROBADO Y COMPLETADO', botConfig, chatId, messageId, storeName, orderId);
+
+            } else if (pollData.ok && (estadoStr === 'procesando' || estadoStr === 'processing')) {
+              if (attempts >= maxAttempts) {
+                clearInterval(pollInterval);
+                await updateOrderAndTelegram(dbRef, 'completed', 'Marcado como completado automáticamente tras 1 min de espera.', '✅ APROBADO (Forzado por Timeout)', botConfig, chatId, messageId, storeName, orderId);
+              }
+            } else {
+              clearInterval(pollInterval);
+              let errorMsg = pollData.error || pollData.msg || pollData.estado || 'Rechazado';
+              const errorLower = String(errorMsg).toLowerCase();
+              if (errorLower.includes('ya fue usado') || errorLower.includes('already used')) {
+                await updateOrderAndTelegram(dbRef, 'completed', `Aprobado forzadamente (API indicó: ${errorMsg})`, '✅ APROBADO (Ya usado)', botConfig, chatId, messageId, storeName, orderId);
+              } else {
+                await updateOrderAndTelegram(dbRef, 'invalid-id', `Verifica que el ID o la cuenta sean correctos. Error: ${errorMsg}`, `❌ RECHAZADO API: ${errorMsg}`, botConfig, chatId, messageId, storeName, orderId);
+              }
+            }
+          } catch (e) {
+            if (attempts >= maxAttempts) {
+              clearInterval(pollInterval);
+              await updateOrderAndTelegram(dbRef, 'completed', 'Marcado como completado automáticamente (Error parsing API).', '✅ APROBADO (Forzado por Error)', botConfig, chatId, messageId, storeName, orderId);
+            }
+          }
+        });
+      });
+
+      req.on('error', (e) => {
+        if (attempts >= maxAttempts) {
+           clearInterval(pollInterval);
+           updateOrderAndTelegram(dbRef, 'completed', 'Marcado completado automático (Error Red).', '✅ APROBADO (Error Red)', botConfig, chatId, messageId, storeName, orderId).catch(console.error);
+        }
+      });
+      req.end();
+
+    } catch(e) {
+      if (attempts >= maxAttempts) {
+         clearInterval(pollInterval);
+      }
+    }
+  }, 5000);
 }
 
 // Iniciar el sistema
