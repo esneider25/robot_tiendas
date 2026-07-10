@@ -221,7 +221,7 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
   const snapshot = await dbRef.once('value');
   const order = snapshot.val();
 
-  if (!order || order.status !== 'pending' || order.botProcessed) return;
+  if (!order || order.botProcessed) return;
 
   // Si tiene la captura, lo procesamos INMEDIATAMENTE
   if (order.screenshot) {
@@ -232,11 +232,17 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
     return;
   }
 
-  // Si pagó con monedero o saldo, lo procesamos INMEDIATAMENTE sin buscar foto
+  // Si pagó con monedero o saldo, o si ya fue procesado automáticamente (status no es pending), lo procesamos INMEDIATAMENTE
   const isWallet = order.paymentMethodId === 'wallet' || (order.paymentMethodName && order.paymentMethodName.toLowerCase().includes('monedero'));
-  if (isWallet) {
+  const isAlreadyProcessed = order.status !== 'pending';
+
+  if (isWallet || isAlreadyProcessed) {
     if (pendingOrderIds.has(orderId)) pendingOrderIds.delete(orderId);
-    console.log(`⚡ [${storeName}] Pedido #${orderId} pagado con Monedero. Añadiendo a la cola sin foto.`);
+    if (isWallet) {
+      console.log(`⚡ [${storeName}] Pedido #${orderId} pagado con Monedero. Añadiendo a la cola sin foto.`);
+    } else {
+      console.log(`⏩ [${storeName}] Pedido #${orderId} ya estaba en estado '${order.status}'. Añadiendo a la cola sin foto.`);
+    }
     orderQueue.add(() => executeProcess(order, storeName, dbRef));
     return;
   }
@@ -291,6 +297,14 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
   processingLocks.add(order.id);
 
   console.log(`\n🔔 [${storeName}] Procesando pedido definitivo: #${order.id}`);
+  
+  // Refrescar estado justo antes de enviar a Telegram (por si el frontend lo auto-completó)
+  const freshSnap = await dbRef.once('value');
+  const freshOrder = freshSnap.val();
+  if (freshOrder) {
+    order = freshOrder;
+  }
+
   await dbRef.update({ botProcessed: true });
 
   let ocrResult = [];
@@ -342,14 +356,14 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
     }
   }
 
-  await sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders, exifrWarning);
+  await sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders, exifrWarning, dbRef);
 }
 
 // ========================================
 // 6. ENVIAR A TELEGRAM
 // ========================================
 
-async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders = [], exifrWarning = '') {
+async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders = [], exifrWarning = '', dbRef = null) {
   const storeConfig = bots[storeName];
   if (!storeConfig || !storeConfig.bot || !storeConfig.chatId) {
     console.error(`❌ Faltan datos de Telegram para ${storeName}`);
@@ -391,6 +405,16 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
        [{ text: '✅ Pagado con Monedero (Automático)', callback_data: 'ignore' }],
        [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
     ];
+  } else if (order.status !== 'pending') {
+    let stateText = '✅ COMPLETADO';
+    if (order.status === 'processing') stateText = '⏳ PROCESANDO...';
+    else if (order.status === 'rejected') stateText = '❌ RECHAZADO';
+    else if (order.status === 'invalid-id') stateText = '❌ ID INVÁLIDO';
+
+    inline_keyboard = [
+       [{ text: stateText, callback_data: 'ignore' }],
+       [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+    ];
   } else {
     inline_keyboard = [
        [
@@ -410,18 +434,23 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
   };
 
   try {
+    let sentMsg;
     if (imageBuffer) {
       // Enviar foto con el mensaje como pie de foto (caption)
       options.caption = msg;
       try {
-        await storeConfig.bot.sendPhoto(storeConfig.chatId, imageBuffer, options, { filename: 'comprobante.jpg', contentType: 'image/jpeg' });
+        sentMsg = await storeConfig.bot.sendPhoto(storeConfig.chatId, imageBuffer, options, { filename: 'comprobante.jpg', contentType: 'image/jpeg' });
       } catch (photoErr) {
         console.error(`⚠️ [${storeName}] Error enviando foto, intentando solo texto. Detalles:`, photoErr.message);
-        await storeConfig.bot.sendMessage(storeConfig.chatId, msg, { parse_mode: 'HTML', reply_markup: options.reply_markup });
+        sentMsg = await storeConfig.bot.sendMessage(storeConfig.chatId, msg, { parse_mode: 'HTML', reply_markup: options.reply_markup });
       }
     } else {
       // Enviar solo texto
-      await storeConfig.bot.sendMessage(storeConfig.chatId, msg, options);
+      sentMsg = await storeConfig.bot.sendMessage(storeConfig.chatId, msg, options);
+    }
+    
+    if (sentMsg && sentMsg.message_id && dbRef) {
+      await dbRef.update({ telegramMessageId: sentMsg.message_id });
     }
     console.log(`✅ [${storeName}] Notificación enviada a Telegram.`);
   } catch (error) {
@@ -476,6 +505,52 @@ async function handleRectificationNotification(order, storeName, appInstance) {
    }
 }
 
+async function syncTelegramStatus(orderId, order, storeName) {
+  if (!order || !order.telegramMessageId || !order.botProcessed) return;
+
+  const storeConfig = bots[storeName];
+  if (!storeConfig || !storeConfig.bot || !storeConfig.chatId) return;
+
+  let inline_keyboard = [];
+  if (order.paymentMethodId === 'wallet') {
+    inline_keyboard = [
+       [{ text: '✅ Pagado con Monedero (Automático)', callback_data: 'ignore' }],
+       [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+    ];
+  } else if (order.status !== 'pending') {
+    let stateText = '✅ COMPLETADO';
+    if (order.status === 'processing') stateText = '⏳ PROCESANDO...';
+    else if (order.status === 'rejected') {
+      stateText = order.rejectReason ? `❌ RECHAZADO: ${order.rejectReason}` : '❌ RECHAZADO';
+    }
+    else if (order.status === 'invalid-id') stateText = '❌ ID INVÁLIDO';
+
+    inline_keyboard = [
+       [{ text: stateText, callback_data: 'ignore' }],
+       [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+    ];
+  } else {
+    inline_keyboard = [
+       [
+         { text: '✅ Aprobar', callback_data: `approve_${orderId}` },
+         { text: '❌ Rechazar', callback_data: `reject_${orderId}` }
+       ],
+       [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+    ];
+  }
+
+  try {
+    await storeConfig.bot.editMessageReplyMarkup(
+      { inline_keyboard }, 
+      { chat_id: storeConfig.chatId, message_id: order.telegramMessageId }
+    );
+  } catch (e) {
+    if (!e.message.includes('is not modified') && !e.message.includes('exactly the same')) {
+      console.error(`❌ [${storeName}] Error sincronizando botones Telegram para #${orderId}:`, e.message);
+    }
+  }
+}
+
 function startListening() {
   const stores = [
     { name: 'CandyStore', app: candyStoreApp },
@@ -503,6 +578,7 @@ function startListening() {
       const orderId = snapshot.key;
       handleRectificationNotification(orderData, store.name, store.app).catch(err => console.error(err));
       processNewOrder(orderId, store.name, store.app, 'child_changed').catch(err => console.error(err));
+      syncTelegramStatus(orderId, orderData, store.name).catch(err => console.error(err));
       
       if (orderData && orderData.status === 'processing') {
           pollApiStatus(orderId, orderData, store.app, store.name).catch(console.error);
