@@ -413,7 +413,12 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
     if (imageBuffer) {
       // Enviar foto con el mensaje como pie de foto (caption)
       options.caption = msg;
-      await storeConfig.bot.sendPhoto(storeConfig.chatId, imageBuffer, options);
+      try {
+        await storeConfig.bot.sendPhoto(storeConfig.chatId, imageBuffer, options, { filename: 'comprobante.jpg', contentType: 'image/jpeg' });
+      } catch (photoErr) {
+        console.error(`⚠️ [${storeName}] Error enviando foto, intentando solo texto. Detalles:`, photoErr.message);
+        await storeConfig.bot.sendMessage(storeConfig.chatId, msg, { parse_mode: 'HTML', reply_markup: options.reply_markup });
+      }
     } else {
       // Enviar solo texto
       await storeConfig.bot.sendMessage(storeConfig.chatId, msg, options);
