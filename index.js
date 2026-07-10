@@ -483,14 +483,25 @@ function startListening() {
     
     // Escuchar nuevos pedidos añadidos
     ref.on('child_added', (snapshot) => {
-      processNewOrder(snapshot.key, store.name, store.app, 'child_added').catch(err => console.error(err));
+      const orderData = snapshot.val();
+      const orderId = snapshot.key;
+      processNewOrder(orderId, store.name, store.app, 'child_added').catch(err => console.error(err));
+      
+      if (orderData && orderData.status === 'processing') {
+          pollApiStatus(orderId, orderData, store.app, store.name).catch(console.error);
+      }
     });
 
     // También escuchar por si el frontend añade la imagen después o si se rectifica
     ref.on('child_changed', (snapshot) => {
       const orderData = snapshot.val();
+      const orderId = snapshot.key;
       handleRectificationNotification(orderData, store.name, store.app).catch(err => console.error(err));
-      processNewOrder(snapshot.key, store.name, store.app, 'child_changed').catch(err => console.error(err));
+      processNewOrder(orderId, store.name, store.app, 'child_changed').catch(err => console.error(err));
+      
+      if (orderData && orderData.status === 'processing') {
+          pollApiStatus(orderId, orderData, store.app, store.name).catch(console.error);
+      }
     });
 
     console.log(`👂 Escuchando en tiempo real: ${store.name}`);
@@ -758,6 +769,13 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
     const snap = await dbRef.once('value');
     const orderData = snap.val();
     if (!orderData) return;
+    
+    // Evitar enviar duplicados si ya fue completado por el frontend
+    if (orderData.status === newStatus || orderData.status === 'completed' || orderData.status === 'invalid-id') {
+        console.log(`⏩ [${storeName}] Pedido #${orderId} ya estaba en ${orderData.status}. Omitiendo actualización de Telegram.`);
+        return;
+    }
+    
     const statusHistory = orderData.statusHistory || [];
     statusHistory.push({
         status: newStatus,
@@ -779,18 +797,30 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
         ]
     };
     try {
-        await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
-        console.log(`✅ [${storeName}] Pedido #${orderId} actualizado tras polling: ${buttonText}`);
+        if (chatId && messageId) {
+            await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+            console.log(`✅ [${storeName}] Pedido #${orderId} actualizado tras polling: ${buttonText}`);
+        } else {
+            const botMsg = `🤖 <b>RECUPERACIÓN AUTOMÁTICA — #${orderId}</b>\n\nEl servidor rescató este pedido que estaba "Procesando" y ha finalizado.\n\nResultado: <b>${buttonText}</b>`;
+            await botConfig.bot.sendMessage(botConfig.chatId, botMsg, { parse_mode: 'HTML', reply_markup: JSON.stringify(newMarkup) });
+            console.log(`✅ [${storeName}] Pedido #${orderId} recuperado por el backend: ${buttonText}`);
+        }
     } catch(e) {
-        console.error(`❌ [${storeName}] Error editando msj en polling para #${orderId}`, e.message);
+        console.error(`❌ [${storeName}] Error editando/enviando msj en polling para #${orderId}`, e.message);
     }
 }
 
+const activePolls = new Set();
+
 async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId) {
+  if (activePolls.has(orderId)) return;
+  
   const apiConfigsSnap = await appInstance.database().ref('api_configs').once('value');
   const apiConfigs = apiConfigsSnap.val() || [];
   const apiIdx = parseInt(orderData.apiProvider);
   if (isNaN(apiIdx) || !apiConfigs[apiIdx]) return;
+  
+  activePolls.add(orderId);
   const api = apiConfigs[apiIdx];
   const baseUrl = api.baseUrl.endsWith('/') ? api.baseUrl.slice(0, -1) : api.baseUrl;
   const botConfig = bots[storeName];
@@ -821,6 +851,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
             
             if (pollData.ok && (estadoStr === 'completado' || estadoStr === 'completed')) {
               clearInterval(pollInterval);
+              activePolls.delete(orderId);
               let note = 'Aprobado y entregado automáticamente (luego de procesar)';
               if (pollData.codigo) note = 'Código entregado: ' + pollData.codigo;
               if (pollData.codigos && pollData.codigos.length > 0) note = 'Códigos entregados:\n' + pollData.codigos.join('\n');
@@ -830,10 +861,12 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
             } else if (pollData.ok && (estadoStr === 'procesando' || estadoStr === 'processing')) {
               if (attempts >= maxAttempts) {
                 clearInterval(pollInterval);
+                activePolls.delete(orderId);
                 await updateOrderAndTelegram(dbRef, 'completed', 'Marcado como completado automáticamente tras 1 min de espera.', '✅ APROBADO (Forzado por Timeout)', botConfig, chatId, messageId, storeName, orderId);
               }
             } else {
               clearInterval(pollInterval);
+              activePolls.delete(orderId);
               let errorMsg = pollData.error || pollData.msg || pollData.estado || 'Rechazado';
               const errorLower = String(errorMsg).toLowerCase();
               if (errorLower.includes('ya fue usado') || errorLower.includes('already used')) {
@@ -851,6 +884,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
           } catch (e) {
             if (attempts >= maxAttempts) {
               clearInterval(pollInterval);
+              activePolls.delete(orderId);
               await updateOrderAndTelegram(dbRef, 'completed', 'Marcado como completado automáticamente (Error parsing API).', '✅ APROBADO (Forzado por Error)', botConfig, chatId, messageId, storeName, orderId);
             }
           }
@@ -860,6 +894,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
       req.on('error', (e) => {
         if (attempts >= maxAttempts) {
            clearInterval(pollInterval);
+           activePolls.delete(orderId);
            updateOrderAndTelegram(dbRef, 'completed', 'Marcado completado automático (Error Red).', '✅ APROBADO (Error Red)', botConfig, chatId, messageId, storeName, orderId).catch(console.error);
         }
       });
@@ -868,6 +903,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
     } catch(e) {
       if (attempts >= maxAttempts) {
          clearInterval(pollInterval);
+         activePolls.delete(orderId);
       }
     }
   }, 5000);
