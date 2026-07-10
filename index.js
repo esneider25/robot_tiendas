@@ -428,6 +428,49 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
 // 7. INICIAR LA ESCUCHA (LISTENERS)
 // ========================================
 
+const notifiedRectifications = new Set();
+
+async function handleRectificationNotification(order, storeName, appInstance) {
+   if (!order || !order.botProcessed) return;
+
+   // Verificar si el pedido ha sido rectificado revisando el historial
+   const isRectified = (order.statusHistory || []).some(h => h.note && h.note.toLowerCase().includes('rectificó'));
+   if (!isRectified) return;
+
+   // Solo notificar si llegó a un estado final tras la rectificación
+   if (order.status === 'completed' || order.status === 'invalid-id') {
+      const cacheKey = `${order.id}_${order.status}_${(order.statusHistory || []).length}`;
+      if (notifiedRectifications.has(cacheKey)) return;
+      notifiedRectifications.add(cacheKey);
+
+      const storeConfig = bots[storeName];
+      let msg = '';
+      if (order.status === 'completed') {
+         msg = `🚀 <b>PEDIDO AUTO-COMPLETADO (Rectificado) — #${order.id}</b>\n`;
+         msg += `El cliente corrigió su ID a <code>${order.gameId}</code> y la recarga se procesó con éxito.\n`;
+         msg += `📝 <b>Nota:</b> ${order.adminNote || 'Entregado'}`;
+      } else if (order.status === 'invalid-id') {
+         msg = `⚠️ <b>DATOS INVÁLIDOS DE NUEVO — #${order.id}</b>\n`;
+         msg += `El cliente intentó corregir el ID a <code>${order.gameId}</code> pero la API lo rechazó otra vez.\n`;
+         msg += `📝 <b>Error:</b> ${order.adminNote || 'ID Inválido'}`;
+      }
+
+      const options = {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]]
+        }
+      };
+
+      try {
+         await storeConfig.bot.sendMessage(storeConfig.chatId, msg, options);
+         console.log(`✅ [${storeName}] Notificación de rectificación enviada para #${order.id}`);
+      } catch (e) {
+         console.error(`❌ [${storeName}] Error enviando rectificación a Telegram:`, e.message);
+      }
+   }
+}
+
 function startListening() {
   const stores = [
     { name: 'CandyStore', app: candyStoreApp },
@@ -443,8 +486,10 @@ function startListening() {
       processNewOrder(snapshot.key, store.name, store.app, 'child_added').catch(err => console.error(err));
     });
 
-    // También escuchar por si el frontend añade la imagen después
+    // También escuchar por si el frontend añade la imagen después o si se rectifica
     ref.on('child_changed', (snapshot) => {
+      const orderData = snapshot.val();
+      handleRectificationNotification(orderData, store.name, store.app).catch(err => console.error(err));
       processNewOrder(snapshot.key, store.name, store.app, 'child_changed').catch(err => console.error(err));
     });
 
