@@ -223,6 +223,19 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
 
   if (!order || order.botProcessed) return;
 
+  // Filtrar pedidos antiguos (más de 6 horas) que no fueron procesados por el bot (para evitar spam en reinicios)
+  if (order.createdAt) {
+      const orderDate = new Date(order.createdAt).getTime();
+      if (!isNaN(orderDate)) {
+          const ageHours = (Date.now() - orderDate) / (1000 * 60 * 60);
+          if (ageHours > 6) {
+              console.log(`🛡️ [Filtro] Pedido antiguo #${orderId} detectado (${Math.round(ageHours)} hrs). Marcando silenciosamente.`);
+              await dbRef.update({ botProcessed: true });
+              return;
+          }
+      }
+  }
+
   // Si tiene la captura, lo procesamos INMEDIATAMENTE
   if (order.screenshot) {
     if (pendingOrderIds.has(orderId)) {
