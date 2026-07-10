@@ -188,6 +188,34 @@ async function performOCR(imageBuffer) {
 const pendingOrderIds = new Set();
 const processingLocks = new Set(); // Candado anti-duplicados
 
+// Sistema de Cola (Queue) para procesar de 1 en 1 y no saturar la memoria RAM
+class PromiseQueue {
+  constructor(concurrency = 1) {
+    this.concurrency = concurrency;
+    this.running = 0;
+    this.queue = [];
+  }
+  add(task) {
+    return new Promise((resolve, reject) => {
+      this.queue.push(async () => {
+        try { resolve(await task()); } 
+        catch (err) { reject(err); }
+      });
+      this.dequeue();
+    });
+  }
+  dequeue() {
+    if (this.running >= this.concurrency || this.queue.length === 0) return;
+    this.running++;
+    const task = this.queue.shift();
+    task().finally(() => {
+      this.running--;
+      this.dequeue();
+    });
+  }
+}
+const orderQueue = new PromiseQueue(1);
+
 async function processNewOrder(orderId, storeName, appInstance, eventType) {
   const dbRef = appInstance.database().ref('orders/' + orderId);
   const snapshot = await dbRef.once('value');
@@ -200,7 +228,7 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
     if (pendingOrderIds.has(orderId)) {
       pendingOrderIds.delete(orderId);
     }
-    await executeProcess(order, storeName, dbRef);
+    orderQueue.add(() => executeProcess(order, storeName, dbRef));
     return;
   }
 
@@ -208,8 +236,8 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
   const isWallet = order.paymentMethodId === 'wallet' || (order.paymentMethodName && order.paymentMethodName.toLowerCase().includes('monedero'));
   if (isWallet) {
     if (pendingOrderIds.has(orderId)) pendingOrderIds.delete(orderId);
-    console.log(`⚡ [${storeName}] Pedido #${orderId} pagado con Monedero. Procesando al instante sin foto.`);
-    await executeProcess(order, storeName, dbRef);
+    console.log(`⚡ [${storeName}] Pedido #${orderId} pagado con Monedero. Añadiendo a la cola sin foto.`);
+    orderQueue.add(() => executeProcess(order, storeName, dbRef));
     return;
   }
 
@@ -230,9 +258,9 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
         
         if (imageBuffer && pendingOrderIds.has(orderId)) {
           pendingOrderIds.delete(orderId);
-          console.log(`✅ [${storeName}] Foto encontrada para #${orderId} (Intento ${attempts + 1})`);
+          console.log(`✅ [${storeName}] Foto encontrada para #${orderId} (Intento ${attempts + 1}). Añadiendo a la cola...`);
           order.screenshot = timestampedUrl;
-          await executeProcess(order, storeName, dbRef, imageBuffer);
+          orderQueue.add(() => executeProcess(order, storeName, dbRef, imageBuffer));
         }
       } catch (e) {
         attempts++;
@@ -241,7 +269,7 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
             pendingOrderIds.delete(orderId);
             console.log(`⚠️ [${storeName}] Expiró el tiempo de espera (3 minutos) para #${orderId}. Procesando sin foto.`);
             order.screenshot = null;
-            await executeProcess(order, storeName, dbRef);
+            orderQueue.add(() => executeProcess(order, storeName, dbRef));
           }
         } else {
           // Volver a intentar en 5 segundos
