@@ -248,7 +248,7 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
     
     const screenshotUrl = `https://firebasestorage.googleapis.com/v0/b/accesplay-8bf5d.firebasestorage.app/o/orders_screenshots%2F${orderId}.jpg?alt=media`;
     let attempts = 0;
-    const maxAttempts = 36; // 36 * 5s = 180 segundos (3 minutos de espera máxima)
+    const maxAttempts = 12; // 12 * 5s = 60 segundos (1 minuto de espera máxima)
     
     const pollImage = async () => {
       try {
@@ -267,7 +267,7 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
         if (attempts >= maxAttempts) {
           if (pendingOrderIds.has(orderId)) {
             pendingOrderIds.delete(orderId);
-            console.log(`⚠️ [${storeName}] Expiró el tiempo de espera (3 minutos) para #${orderId}. Procesando sin foto.`);
+            console.log(`⚠️ [${storeName}] Expiró el tiempo de espera (1 minuto) para #${orderId}. Procesando sin foto.`);
             order.screenshot = null;
             orderQueue.add(() => executeProcess(order, storeName, dbRef));
           }
