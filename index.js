@@ -557,6 +557,7 @@ Object.keys(bots).forEach(storeName => {
         let rejectMsg = 'Pedido rechazado';
         if (reasonCode === 'monto') rejectMsg = '💰 Monto Incompleto';
         else if (reasonCode === 'duplicado') rejectMsg = '⚠️ Pago duplicado';
+        else if (reasonCode === 'captura') rejectMsg = '🖼️ Error captura no cargó, enviar el pago nuevamente';
         else if (reasonCode === 'general') rejectMsg = '🚫 Pedido rechazado';
 
         try {
@@ -671,6 +672,7 @@ Object.keys(bots).forEach(storeName => {
           inline_keyboard: [
             [{ text: '💰 Monto Incompleto', callback_data: `rejectreason_${orderId}_monto` }],
             [{ text: '⚠️ Pago duplicado', callback_data: `rejectreason_${orderId}_duplicado` }],
+            [{ text: '🖼️ Error captura no cargó, enviar el pago nuevamente', callback_data: `rejectreason_${orderId}_captura` }],
             [{ text: '🚫 Pedido rechazado', callback_data: `rejectreason_${orderId}_general` }],
             [{ text: '🔙 Cancelar', callback_data: `cancelreject_${orderId}` }]
           ]
