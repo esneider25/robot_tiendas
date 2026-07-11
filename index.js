@@ -66,19 +66,31 @@ console.log('✅ Bases de datos conectadas.');
 // 3. CONFIGURAR LOS 3 BOTS DE TELEGRAM
 const bots = {
   CandyStore: {
-    bot: new TelegramBot(process.env.CANDYSTORE_BOT_TOKEN, { polling: true }),
+    bot: new TelegramBot(process.env.CANDYSTORE_BOT_TOKEN, { 
+      polling: {
+        params: { allowed_updates: ['message', 'callback_query'] }
+      }
+    }),
     chatId: process.env.CANDYSTORE_CHAT_ID,
     emoji: '🍬',
     adminUrl: 'https://candystore-zeta.vercel.app/admin'
   },
   RecargaShark: {
-    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { polling: true }),
+    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { 
+      polling: {
+        params: { allowed_updates: ['message', 'callback_query'] }
+      }
+    }),
     chatId: process.env.RECARGASHARK_CHAT_ID || '6012452103',
     emoji: '🦈',
     adminUrl: 'https://admin.recargashark.com/admin'
   },
   AccessPlay: {
-    bot: new TelegramBot(process.env.ACCESSPLAY_BOT_TOKEN, { polling: true }),
+    bot: new TelegramBot(process.env.ACCESSPLAY_BOT_TOKEN, { 
+      polling: {
+        params: { allowed_updates: ['message', 'callback_query'] }
+      }
+    }),
     chatId: process.env.ACCESSPLAY_CHAT_ID,
     emoji: '🎮',
     adminUrl: 'https://www.accesplay.com/admin'
