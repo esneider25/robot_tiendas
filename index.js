@@ -370,6 +370,37 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
     }
   }
 
+  // AUTO-API PARA PAGOS CON MONEDERO (Si la API está encendida)
+  const appInstance = storeApps[storeName];
+  if (order.paymentMethodId === 'wallet' && order.status === 'pending') {
+    const apiConfigsSnap = await appInstance.database().ref('api_configs').once('value');
+    const apiConfigs = apiConfigsSnap.val() || [];
+    const apiIdx = parseInt(order.apiProvider);
+    
+    if (!isNaN(apiIdx) && apiConfigs[apiIdx] && apiConfigs[apiIdx].enabled) {
+      console.log(`⚡ [${storeName}] API habilitada. Disparando recarga automática para pedido de monedero #${order.id}`);
+      try {
+        const apiRes = await processApiTopupFromTelegram(order, appInstance);
+        order.status = apiRes.status;
+        order.adminNote = apiRes.dbNote;
+        const statusHistory = order.statusHistory || [];
+        statusHistory.push({
+          status: apiRes.status,
+          timestamp: new Date().toISOString(),
+          note: apiRes.dbNote
+        });
+        await dbRef.update({
+          status: apiRes.status,
+          adminNote: apiRes.dbNote,
+          updatedAt: new Date().toISOString(),
+          statusHistory: statusHistory
+        });
+      } catch(e) {
+        console.error('Error auto-disparando API para monedero:', e);
+      }
+    }
+  }
+
   await sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders, exifrWarning, dbRef);
 }
 
@@ -414,12 +445,7 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
   msg += `📱 <b>Contacto:</b> ${order.customerContact || 'N/A'}\n`;
 
   let inline_keyboard = [];
-  if (order.paymentMethodId === 'wallet') {
-    inline_keyboard = [
-       [{ text: '✅ Pagado con Monedero (Automático)', callback_data: 'ignore' }],
-       [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
-    ];
-  } else if (order.status !== 'pending') {
+  if (order.status !== 'pending') {
     let stateText = '✅ COMPLETADO';
     if (order.status === 'processing') stateText = '⏳ PROCESANDO...';
     else if (order.status === 'rejected') stateText = '❌ RECHAZADO';
@@ -674,6 +700,26 @@ Object.keys(bots).forEach(storeName => {
              updatedAt: new Date().toISOString(),
              statusHistory: statusHistory
           });
+
+          // LÓGICA DE REEMBOLSO PARA PAGOS CON MONEDERO
+          if (orderData.paymentMethodId === 'wallet' && orderData.userId && orderData.productType !== 'wallet-recharge') {
+            try {
+              const walletRef = appInstance.database().ref('users/' + orderData.userId + '/wallet');
+              const walletSnap = await walletRef.once('value');
+              const currentWallet = parseFloat(walletSnap.val() || 0);
+              const amountToRefund = parseFloat(orderData.priceUsd || 0);
+              await walletRef.set(currentWallet + amountToRefund);
+              
+              await appInstance.database().ref('users/' + orderData.userId + '/transactions').push({
+                id: Date.now().toString(),
+                type: 'deposit',
+                amount: amountToRefund,
+                description: `Pago reembolsado por pedido rechazado (#${orderData.id})`,
+                date: Date.now()
+              });
+              console.log(`💸 Reembolso de $${amountToRefund} aplicado a ${orderData.userId}`);
+            } catch(e) { console.error('Error reembolsando monedero:', e); }
+          }
           
           const newMarkup = {
             inline_keyboard: [
