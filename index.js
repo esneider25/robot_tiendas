@@ -640,9 +640,17 @@ const telegramLocks = new Set(); // Candado anti doble-clic en Telegram
 Object.keys(bots).forEach(storeName => {
   const botConfig = bots[storeName];
   botConfig.bot.on('callback_query', async (query) => {
-    const data = query.data;
+    const data = query.data || '';
+    if (!query.message) return; // Ignore if no message attached
+
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
+
+    // Handle dummy buttons so they don't spin forever
+    if (data === 'ignore' || data === 'noop') {
+      try { await botConfig.bot.answerCallbackQuery(query.id); } catch(e){}
+      return;
+    }
 
     if (!data.startsWith('approve_') && !data.startsWith('reject_') && !data.startsWith('rejectreason_') && !data.startsWith('cancelreject_')) return;
 
@@ -665,9 +673,11 @@ Object.keys(bots).forEach(storeName => {
 
     // Manejar motivos de rechazo específicos
     if (data.startsWith('rejectreason_')) {
-        const parts = data.split('_');
-        const orderId = parts[1];
-        const reasonCode = parts[2];
+        const actionPrefix = 'rejectreason_';
+        const rest = data.substring(actionPrefix.length);
+        const lastUnderscore = rest.lastIndexOf('_');
+        const orderId = rest.substring(0, lastUnderscore);
+        const reasonCode = rest.substring(lastUnderscore + 1);
         const appInstance = storeApps[storeName];
         
         let rejectMsg = 'Pedido rechazado';
@@ -754,7 +764,7 @@ Object.keys(bots).forEach(storeName => {
 
       // Verificar que el pedido siga pendiente antes de hacer nada
       if (!orderData || orderData.status !== 'pending') {
-        await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado anteriormente.', show_alert: true });
+        try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado anteriormente o no existe.', show_alert: true }); } catch(e){}
         telegramLocks.delete(orderId);
         return;
       }
@@ -823,7 +833,7 @@ Object.keys(bots).forEach(storeName => {
       }
     } catch (e) {
       console.error(`Error procesando callback para ${orderId}:`, e);
-      await botConfig.bot.answerCallbackQuery(query.id, { text: 'Hubo un error al actualizar la base de datos.', show_alert: true });
+      try { await botConfig.bot.answerCallbackQuery(query.id, { text: 'Hubo un error interno. Intenta de nuevo.', show_alert: true }); } catch(err) {}
     } finally {
       telegramLocks.delete(orderId); // Liberar el candado
     }
