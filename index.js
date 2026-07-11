@@ -754,6 +754,11 @@ Object.keys(bots).forEach(storeName => {
         await botConfig.bot.answerCallbackQuery(query.id, { text: `Resultado: ${buttonText}` });
         console.log(`✅ [${storeName}] Pedido #${orderId} procesado desde Telegram: ${buttonText}`);
         
+        if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
+            const codeMsg = `🤖 <b>ENTREGA DE CÓDIGO — #${orderId}</b>\n\n${adminNote}`;
+            await botConfig.bot.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
+        }
+
         if (newStatus === 'processing') {
             pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId);
         }
@@ -836,7 +841,10 @@ async function processApiTopupFromTelegram(order, appInstance) {
         try {
           const data = JSON.parse(dataStr);
           if (data.ok && data.estado === 'completado') {
-             resolve({ status: 'completed', msg: '✅ RECARGA EXITOSA (API)', dbNote: 'Pedido realizado exitosamente' });
+             let note = 'Pedido realizado exitosamente';
+             if (data.codigo) note = 'Código entregado: ' + data.codigo;
+             if (data.codigos && data.codigos.length > 0) note = 'Códigos entregados:\n' + data.codigos.join('\n');
+             resolve({ status: 'completed', msg: '✅ RECARGA EXITOSA (API)', dbNote: note });
           } else if (data.ok && data.estado === 'procesando') {
              resolve({ status: 'processing', msg: '⏳ API PROCESANDO...', dbNote: 'Procesando en API externa...' });
           } else {
@@ -901,6 +909,12 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
             const botMsg = `🤖 <b>RECUPERACIÓN AUTOMÁTICA — #${orderId}</b>\n\nEl servidor rescató este pedido que estaba "Procesando" y ha finalizado.\n\nResultado: <b>${buttonText}</b>`;
             await botConfig.bot.sendMessage(botConfig.chatId, botMsg, { parse_mode: 'HTML', reply_markup: JSON.stringify(newMarkup) });
             console.log(`✅ [${storeName}] Pedido #${orderId} recuperado por el backend: ${buttonText}`);
+        }
+
+        if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
+            const targetChat = chatId || botConfig.chatId;
+            const codeMsg = `🤖 <b>ENTREGA AUTOMÁTICA — #${orderId}</b>\n\n${adminNote}`;
+            await botConfig.bot.sendMessage(targetChat, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
         }
     } catch(e) {
         console.error(`❌ [${storeName}] Error editando/enviando msj en polling para #${orderId}`, e.message);
