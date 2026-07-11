@@ -877,7 +877,8 @@ async function processApiTopupFromTelegram(order, appInstance) {
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': api.apiKey || ''
-      }
+      },
+      timeout: 15000 // 15 segundos máximo
     };
     
     const req = https.request(url, options, (res) => {
@@ -905,6 +906,11 @@ async function processApiTopupFromTelegram(order, appInstance) {
           resolve({ status: 'completed', msg: '✅ APROBADO (API Error Parsing)', dbNote: 'Pedido realizado exitosamente' });
         }
       });
+    });
+    
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ status: 'completed', msg: '✅ APROBADO (Local - Timeout API)', dbNote: 'Aprobado local. La API externa tardó demasiado en responder.' });
     });
     
     req.on('error', (e) => {
