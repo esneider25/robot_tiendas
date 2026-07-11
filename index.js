@@ -427,11 +427,18 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
     return;
   }
 
+  // Función para escapar caracteres HTML conflictivos
+  const escapeHtml = (text) => {
+    if (!text) return text;
+    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  };
+
   // Armar el mensaje
+
   let msg = `${storeConfig.emoji} <b>NUEVO PEDIDO [${storeName.toUpperCase()}] — #${order.id}</b>\n`;
-  msg += `👤 <b>Jugador/Cliente:</b> ${order.playerName || order.customerContact || 'ㅤ'}\n`;
-  msg += `🆔 <b>ID / Correo:</b> <code>${order.gameId || order.accountEmail || 'N/A'}</code>\n`;
-  msg += `🔥 <b>Producto:</b> ${order.productName} (${order.packageLabel})\n`;
+  msg += `👤 <b>Jugador/Cliente:</b> ${escapeHtml(order.playerName || order.customerContact || 'ㅤ')}\n`;
+  msg += `🆔 <b>ID / Correo:</b> <code>${escapeHtml(order.gameId || order.accountEmail || 'N/A')}</code>\n`;
+  msg += `🔥 <b>Producto:</b> ${escapeHtml(order.productName)} (${escapeHtml(order.packageLabel)})\n`;
   let montoText = `$${(order.priceUsd || 0).toFixed(2)} USD`;
   if (order.priceBs) {
     montoText += ` | Bs. ${parseFloat(order.priceBs).toFixed(2)}`;
