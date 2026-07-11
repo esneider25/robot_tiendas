@@ -1,4 +1,5 @@
 require('dotenv').config();
+process.env.NTBA_FIX_350 = 1; // Apagar el DeprecationWarning de envío de archivos
 const admin = require('firebase-admin');
 const TelegramBot = require('node-telegram-bot-api');
 const Tesseract = require('tesseract.js');
