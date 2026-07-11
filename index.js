@@ -806,7 +806,52 @@ Object.keys(bots).forEach(storeName => {
              updatedAt: new Date().toISOString(),
              statusHistory: statusHistory
           });
-      telegramLocks.delete(orderId); // Liberar el candado
+
+          // Editar los botones del mensaje para mostrar el resultado
+          const newMarkup = {
+            inline_keyboard: [
+               [{ text: buttonText, callback_data: 'noop' }],
+               [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+            ]
+          };
+          console.log(`[${storeName}] 💬 Enviando markup y answerCallbackQuery...`);
+          await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+          await botConfig.bot.answerCallbackQuery(query.id, { text: `Resultado: ${buttonText}` });
+          console.log(`✅ [${storeName}] Pedido #${orderId} procesado desde Telegram: ${buttonText}`);
+          
+          if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
+              const codeMsg = `🤖 <b>ENTREGA DE CÓDIGO — #${orderId}</b>\n\n${adminNote}`;
+              await botConfig.bot.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
+          }
+
+          if (newStatus === 'processing') {
+              pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId);
+          }
+        } else if (action === 'reject') {
+          console.log(`[${storeName}] ❌ Procesando rechazo (mostrando opciones) para:`, orderId);
+          const newMarkup = {
+            inline_keyboard: [
+              [{ text: '💰 Monto Incompleto', callback_data: `rejectreason_${orderId}_monto` }],
+              [{ text: '⚠️ Pago duplicado', callback_data: `rejectreason_${orderId}_duplicado` }],
+              [{ text: '🖼️ Error captura no cargó, enviar el pago nuevamente', callback_data: `rejectreason_${orderId}_captura` }],
+              [{ text: '🚫 Pedido rechazado', callback_data: `rejectreason_${orderId}_general` }],
+              [{ text: '🔙 Cancelar', callback_data: `cancelreject_${orderId}` }]
+            ]
+          };
+          await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+          await botConfig.bot.answerCallbackQuery(query.id, { text: 'Selecciona el motivo del rechazo:' });
+          console.log(`[${storeName}] ✨ Opciones de rechazo enviadas.`);
+        }
+      } catch (e) {
+        console.error(`Error procesando callback para ${orderId}:`, e);
+        try { await botConfig.bot.answerCallbackQuery(query.id, { text: 'Hubo un error interno. Intenta de nuevo.', show_alert: true }); } catch(err) {}
+      } finally {
+        telegramLocks.delete(orderId); // Liberar el candado
+        console.log(`[${storeName}] 🔓 Lock liberado para:`, orderId);
+      }
+    } catch (criticalError) {
+      console.error(`[${storeName}] 💥 ERROR CRÍTICO NO CONTROLADO en callback_query:`, criticalError);
+      try { await botConfig.bot.answerCallbackQuery(query.id, { text: 'Error de sistema.', show_alert: true }); } catch(err) {}
     }
   });
 });
