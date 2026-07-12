@@ -414,6 +414,11 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
   }
 
   await sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders, exifrWarning, dbRef);
+
+  if (order.status === 'processing' && order.paymentMethodId === 'wallet') {
+      console.log(`[${storeName}] Pedido #${order.id} de monedero quedó PROCESANDO. Iniciando Polling automático.`);
+      pollApiStatus(order.id, order, appInstance, storeName, bots[storeName].chatId, null).catch(console.error);
+  }
 }
 
 // ========================================
@@ -948,18 +953,18 @@ async function processApiTopupFromTelegram(order, appInstance) {
              }
           }
         } catch(e) {
-          resolve({ status: 'completed', msg: '✅ APROBADO (API Error Parsing)', dbNote: 'Pedido realizado exitosamente' });
+          resolve({ status: 'processing', msg: '⚠️ API ERROR (Manual)', dbNote: 'Error leyendo API. Requiere revisión manual.' });
         }
       });
     });
     
     req.on('timeout', () => {
       req.destroy();
-      resolve({ status: 'completed', msg: '✅ APROBADO (Local - Timeout API)', dbNote: 'Aprobado local. La API externa tardó demasiado en responder.' });
+      resolve({ status: 'processing', msg: '⏳ TIMEOUT API', dbNote: 'La API externa tardó demasiado. Requiere revisión manual.' });
     });
     
     req.on('error', (e) => {
-      resolve({ status: 'completed', msg: '✅ APROBADO (API Caída)', dbNote: 'Pedido realizado exitosamente' });
+      resolve({ status: 'processing', msg: '⚠️ API CAÍDA', dbNote: 'Fallo de conexión. Requiere revisión manual.' });
     });
     
     req.write(JSON.stringify(payload));
@@ -1070,7 +1075,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
               if (attempts >= maxAttempts) {
                 clearInterval(pollInterval);
                 activePolls.delete(orderId);
-                await updateOrderAndTelegram(dbRef, 'completed', 'Marcado como completado automáticamente tras 1 min de espera.', '✅ APROBADO (Forzado por Timeout)', botConfig, chatId, messageId, storeName, orderId);
+                await updateOrderAndTelegram(dbRef, 'processing', 'La API no dio respuesta final tras 1 minuto. Requiere revisión manual.', '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
               }
             } else {
               clearInterval(pollInterval);
@@ -1093,7 +1098,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
             if (attempts >= maxAttempts) {
               clearInterval(pollInterval);
               activePolls.delete(orderId);
-              await updateOrderAndTelegram(dbRef, 'completed', 'Marcado como completado automáticamente (Error parsing API).', '✅ APROBADO (Forzado por Error)', botConfig, chatId, messageId, storeName, orderId);
+              await updateOrderAndTelegram(dbRef, 'processing', 'Marcado para revisión manual tras 1 min (Error API).', '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
             }
           }
         });
