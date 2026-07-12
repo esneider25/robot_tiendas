@@ -475,18 +475,29 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
     else if (order.status === 'rejected') stateText = '❌ RECHAZADO';
     else if (order.status === 'invalid-id') stateText = '❌ ID INVÁLIDO';
 
+    if (order.status === 'completed' && order.paymentMethodId === 'wallet') {
+      stateText = '✅ Pagado con Monedero (Automático)';
+    }
+
     inline_keyboard = [
        [{ text: stateText, callback_data: 'ignore' }],
        [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
     ];
   } else {
-    inline_keyboard = [
-       [
-         { text: '✅ Aprobar', callback_data: `approve_${order.id}` },
-         { text: '❌ Rechazar', callback_data: `reject_${order.id}` }
-       ],
-       [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
-    ];
+    if (order.paymentMethodId === 'wallet') {
+      inline_keyboard = [
+         [{ text: '⏳ Auto-Procesando...', callback_data: 'ignore' }],
+         [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+      ];
+    } else {
+      inline_keyboard = [
+         [
+           { text: '✅ Aprobar', callback_data: `approve_${order.id}` },
+           { text: '❌ Rechazar', callback_data: `reject_${order.id}` }
+         ],
+         [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+      ];
+    }
   }
 
   // Opciones de botones para el mensaje
