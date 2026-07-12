@@ -660,7 +660,8 @@ function startListening() {
 
       // DETECCIÓN DE RECTIFICACIÓN
       if (orderData && orderData.status === 'pending') {
-         const history = orderData.statusHistory || [];
+         const rawHistory = orderData.statusHistory || [];
+         const history = Array.isArray(rawHistory) ? rawHistory : Object.values(rawHistory);
          const lastHistory = history[history.length - 1];
          // Si el último evento fue una rectificación
          if (lastHistory && lastHistory.note && lastHistory.note.toLowerCase().includes('rectificó')) {
