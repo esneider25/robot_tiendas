@@ -576,31 +576,37 @@ async function syncTelegramStatus(orderId, order, storeName) {
   if (!storeConfig || !storeConfig.bot || !storeConfig.chatId) return;
 
   let inline_keyboard = [];
-  if (order.paymentMethodId === 'wallet') {
-    inline_keyboard = [
-       [{ text: '✅ Pagado con Monedero (Automático)', callback_data: 'ignore' }],
-       [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
-    ];
-  } else if (order.status !== 'pending') {
+  if (order.status !== 'pending') {
     let stateText = '✅ COMPLETADO';
     if (order.status === 'processing') stateText = '⏳ PROCESANDO...';
     else if (order.status === 'rejected') {
       stateText = order.rejectReason ? `❌ RECHAZADO: ${order.rejectReason}` : '❌ RECHAZADO';
     }
     else if (order.status === 'invalid-id') stateText = '❌ ID INVÁLIDO';
+    
+    if (order.status === 'completed' && order.paymentMethodId === 'wallet') {
+      stateText = '✅ Pagado con Monedero (Automático)';
+    }
 
     inline_keyboard = [
        [{ text: stateText, callback_data: 'ignore' }],
        [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
     ];
   } else {
-    inline_keyboard = [
-       [
-         { text: '✅ Aprobar', callback_data: `approve_${orderId}` },
-         { text: '❌ Rechazar', callback_data: `reject_${orderId}` }
-       ],
-       [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
-    ];
+    if (order.paymentMethodId === 'wallet') {
+      inline_keyboard = [
+         [{ text: '⏳ Auto-Procesando...', callback_data: 'ignore' }],
+         [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+      ];
+    } else {
+      inline_keyboard = [
+         [
+           { text: '✅ Aprobar', callback_data: `approve_${orderId}` },
+           { text: '❌ Rechazar', callback_data: `reject_${orderId}` }
+         ],
+         [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+      ];
+    }
   }
 
   try {
@@ -637,9 +643,43 @@ function startListening() {
     });
 
     // También escuchar por si el frontend añade la imagen después o si se rectifica
-    ref.on('child_changed', (snapshot) => {
+    ref.on('child_changed', async (snapshot) => {
       const orderData = snapshot.val();
       const orderId = snapshot.key;
+
+      // DETECCIÓN DE RECTIFICACIÓN
+      if (orderData && orderData.status === 'pending') {
+         const history = orderData.statusHistory || [];
+         const lastHistory = history[history.length - 1];
+         // Si el último evento fue una rectificación
+         if (lastHistory && lastHistory.note && lastHistory.note.toLowerCase().includes('rectificó')) {
+             console.log(`🔄 [${store.name}] Rectificación detectada para #${orderId}. Re-intentando API...`);
+             try {
+                 const apiRes = await processApiTopupFromTelegram(orderData, store.app);
+                 orderData.status = apiRes.status;
+                 orderData.adminNote = apiRes.dbNote;
+                 
+                 const newHistory = [...history, {
+                     status: apiRes.status,
+                     timestamp: new Date().toISOString(),
+                     note: apiRes.dbNote
+                 }];
+                 
+                 await ref.child(orderId).update({
+                     status: apiRes.status,
+                     adminNote: apiRes.dbNote,
+                     updatedAt: new Date().toISOString(),
+                     statusHistory: newHistory
+                 });
+                 // Actualizamos telegram
+                 await syncTelegramStatus(orderId, orderData, store.name);
+                 return; // Evitar que el resto del child_changed procese si acabamos de actualizar
+             } catch (e) {
+                 console.error('❌ Error re-procesando rectificación:', e);
+             }
+         }
+      }
+
       handleRectificationNotification(orderData, store.name, store.app).catch(err => console.error(err));
       processNewOrder(orderId, store.name, store.app, 'child_changed').catch(err => console.error(err));
       syncTelegramStatus(orderId, orderData, store.name).catch(err => console.error(err));
@@ -948,8 +988,10 @@ async function processApiTopupFromTelegram(order, appInstance) {
              const errorStr = (data.error || '').toLowerCase();
              if (errorStr.includes('ya fue usado') || errorStr.includes('already used')) {
                 resolve({ status: 'completed', msg: '✅ APROBADO (Ya usado)', dbNote: 'Pedido realizado exitosamente' });
+             } else if (errorStr.includes('saldo') || errorStr.includes('balance') || errorStr.includes('pin') || errorStr.includes('stock')) {
+                resolve({ status: 'processing', msg: '⚠️ PAUSADO: Sin Saldo/Stock', dbNote: `TiendaGiftVen: ${data.error}` });
              } else {
-                resolve({ status: 'invalid-id', msg: `❌ RECHAZADO API: ${data.error}`, dbNote: 'ID Invalido' });
+                resolve({ status: 'invalid-id', msg: `❌ RECHAZADO API: ${data.error}`, dbNote: `ID Invalido: ${data.error}` });
              }
           }
         } catch(e) {
@@ -1087,11 +1129,18 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
               } else {
                 let clientNote = 'ID Inválido o producto no disponible';
                 if (errorLower.includes('saldo') || errorLower.includes('balance') || errorLower.includes('pin') || errorLower.includes('stock')) {
-                    clientNote = 'Error temporal en el servidor. Por favor, contacta a soporte.';
-                } else if (errorLower.includes('id') || errorLower.includes('cuenta') || errorLower.includes('jugador') || errorLower.includes('not found')) {
-                    clientNote = 'Verifica que el ID o la cuenta sean correctos.';
+                    clientNote = 'El proveedor se quedó sin saldo o stock. Revisión manual requerida.';
+                    await updateOrderAndTelegram(dbRef, 'processing', clientNote, `⚠️ PAUSADO: Sin Saldo/Stock`, botConfig, chatId, messageId, storeName, orderId);
+                    
+                    // Alerta admin
+                    const alertMsg = `⚠️ <b>ALERTA DE FONDOS / STOCK</b> ⚠️\n\nEl pedido #${orderId} no pudo ser procesado porque TiendaGiftVen indicó falta de saldo o pines.\n\n<b>Error:</b> ${errorMsg}\n\nEl pedido quedó en "PROCESANDO". Complétalo manualmente.`;
+                    await botConfig.bot.sendMessage(botConfig.chatId, alertMsg, { parse_mode: 'HTML' });
+                } else {
+                    if (errorLower.includes('id') || errorLower.includes('cuenta') || errorLower.includes('jugador') || errorLower.includes('not found')) {
+                        clientNote = 'Verifica que el ID o la cuenta sean correctos.';
+                    }
+                    await updateOrderAndTelegram(dbRef, 'invalid-id', clientNote, `❌ RECHAZADO API: ${errorMsg}`, botConfig, chatId, messageId, storeName, orderId);
                 }
-                await updateOrderAndTelegram(dbRef, 'invalid-id', clientNote, `❌ RECHAZADO API: ${errorMsg}`, botConfig, chatId, messageId, storeName, orderId);
               }
             }
           } catch (e) {
