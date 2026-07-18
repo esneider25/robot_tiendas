@@ -64,45 +64,42 @@ console.log('✅ Bases de datos conectadas.');
 
 // ========================================
 // 3. CONFIGURAR LOS 3 BOTS DE TELEGRAM
+// ========================================
 const bots = {
   CandyStore: {
-    bot: new TelegramBot(process.env.CANDYSTORE_BOT_TOKEN, { 
-      polling: {
-        params: { allowed_updates: ['message', 'callback_query'] }
-      }
-    }),
+    bot: new TelegramBot(process.env.CANDYSTORE_BOT_TOKEN, { polling: false }),
     chatId: process.env.CANDYSTORE_CHAT_ID,
     emoji: '🍬',
     adminUrl: 'https://candystore-zeta.vercel.app/admin'
   },
   RecargaShark: {
-    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { 
-      polling: {
-        params: { allowed_updates: ['message', 'callback_query'] }
-      }
-    }),
+    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { polling: false }),
     chatId: process.env.RECARGASHARK_CHAT_ID || '6012452103',
     emoji: '🦈',
     adminUrl: 'https://admin.recargashark.com/admin'
   },
   AccessPlay: {
-    bot: new TelegramBot(process.env.ACCESSPLAY_BOT_TOKEN, { 
-      polling: {
-        params: { allowed_updates: ['message', 'callback_query'] }
-      }
-    }),
+    bot: new TelegramBot(process.env.ACCESSPLAY_BOT_TOKEN, { polling: false }),
     chatId: process.env.ACCESSPLAY_CHAT_ID,
     emoji: '🎮',
     adminUrl: 'https://www.accesplay.com/admin'
   }
 };
 
-console.log('✅ Bots de Telegram configurados.');
+console.log('✅ Bots de Telegram configurados. Iniciando limpieza y polling...');
 
 Object.keys(bots).forEach(storeName => {
   const botConfig = bots[storeName];
   if (botConfig && botConfig.bot) {
-    botConfig.bot.deleteWebHook().catch(e => console.error(`[${storeName}] Error borrando webhook:`, e.message));
+    botConfig.bot.deleteWebHook().then(() => {
+      console.log(`[${storeName}] Webhook eliminado correctamente. Iniciando polling...`);
+      botConfig.bot.startPolling({ params: { allowed_updates: ['message', 'callback_query'] } });
+    }).catch(e => {
+      console.error(`[${storeName}] Error borrando webhook:`, e.message);
+      // Intentar iniciar polling de todas formas
+      botConfig.bot.startPolling({ params: { allowed_updates: ['message', 'callback_query'] } });
+    });
+    
     botConfig.bot.on('polling_error', (error) => {
       console.error(`[${storeName}] Error de Polling:`, error.message);
     });
