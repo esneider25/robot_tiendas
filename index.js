@@ -947,6 +947,8 @@ Object.keys(bots).forEach(storeName => {
       const orderId = data.substring(action.length + 1); // Extraer el ID
       const appInstance = storeApps[storeName];
 
+      console.log(`[${storeName}] DEBUG: action=${action}, orderId=${orderId}`);
+
       if (telegramLocks.has(orderId)) {
         console.log(`[${storeName}] ⏳ Bloqueado por telegramLocks:`, orderId);
         try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⏳ Procesando pedido, por favor espera...' }); } catch(e){}
@@ -958,12 +960,19 @@ Object.keys(bots).forEach(storeName => {
       try {
         console.log(`[${storeName}] 📡 Consultando Firebase para el pedido:`, orderId);
         const dbRef = appInstance.database().ref('orders/' + orderId);
-        const snap = await dbRef.once('value');
+        
+        // Timeout para dbRef.once por si Firebase se queda colgado
+        const snap = await Promise.race([
+          dbRef.once('value'),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Firebase timeout')), 10000))
+        ]);
+        
+        console.log(`[${storeName}] 📡 Firebase respondió para el pedido:`, orderId);
         const orderData = snap.val();
 
         if (!orderData || orderData.status !== 'pending') {
-          console.log(`[${storeName}] ⚠️ Pedido ya no está pendiente o no existe.`);
-          try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado anteriormente o no existe.', show_alert: true }); } catch(e){}
+          console.log(`[${storeName}] ⚠️ Pedido ya no está pendiente o no existe. Data:`, !!orderData);
+          try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado anteriormente o no existe.', show_alert: true }); } catch(e){ console.error('Error answerCallbackQuery', e); }
           telegramLocks.delete(orderId);
           return;
         }
