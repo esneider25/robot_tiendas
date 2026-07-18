@@ -67,44 +67,38 @@ console.log('✅ Bases de datos conectadas.');
 // ========================================
 const bots = {
   CandyStore: {
-    bot: new TelegramBot(process.env.CANDYSTORE_BOT_TOKEN, { polling: false }),
+    bot: new TelegramBot(process.env.CANDYSTORE_BOT_TOKEN, { 
+      polling: {
+        params: { allowed_updates: ['message', 'callback_query'] }
+      }
+    }),
     chatId: process.env.CANDYSTORE_CHAT_ID,
     emoji: '🍬',
     adminUrl: 'https://candystore-zeta.vercel.app/admin'
   },
   RecargaShark: {
-    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { polling: false }),
+    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { 
+      polling: {
+        params: { allowed_updates: ['message', 'callback_query'] }
+      }
+    }),
     chatId: process.env.RECARGASHARK_CHAT_ID || '6012452103',
     emoji: '🦈',
     adminUrl: 'https://admin.recargashark.com/admin'
   },
   AccessPlay: {
-    bot: new TelegramBot(process.env.ACCESSPLAY_BOT_TOKEN, { polling: false }),
+    bot: new TelegramBot(process.env.ACCESSPLAY_BOT_TOKEN, { 
+      polling: {
+        params: { allowed_updates: ['message', 'callback_query'] }
+      }
+    }),
     chatId: process.env.ACCESSPLAY_CHAT_ID,
     emoji: '🎮',
     adminUrl: 'https://www.accesplay.com/admin'
   }
 };
 
-console.log('✅ Bots de Telegram configurados. Iniciando limpieza y polling...');
-
-Object.keys(bots).forEach(storeName => {
-  const botConfig = bots[storeName];
-  if (botConfig && botConfig.bot) {
-    botConfig.bot.deleteWebHook().then(() => {
-      console.log(`[${storeName}] Webhook eliminado correctamente. Iniciando polling...`);
-      botConfig.bot.startPolling({ params: { allowed_updates: ['message', 'callback_query'] } });
-    }).catch(e => {
-      console.error(`[${storeName}] Error borrando webhook:`, e.message);
-      // Intentar iniciar polling de todas formas
-      botConfig.bot.startPolling({ params: { allowed_updates: ['message', 'callback_query'] } });
-    });
-    
-    botConfig.bot.on('polling_error', (error) => {
-      console.error(`[${storeName}] Error de Polling:`, error.message);
-    });
-  }
-});
+console.log('✅ Bots de Telegram configurados.');
 
 // ========================================
 // 3.5 VIP CASHBACK & PUNTOS (Replica de data.js para el bot)
@@ -947,8 +941,6 @@ Object.keys(bots).forEach(storeName => {
       const orderId = data.substring(action.length + 1); // Extraer el ID
       const appInstance = storeApps[storeName];
 
-      console.log(`[${storeName}] DEBUG: action=${action}, orderId=${orderId}`);
-
       if (telegramLocks.has(orderId)) {
         console.log(`[${storeName}] ⏳ Bloqueado por telegramLocks:`, orderId);
         try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⏳ Procesando pedido, por favor espera...' }); } catch(e){}
@@ -960,19 +952,12 @@ Object.keys(bots).forEach(storeName => {
       try {
         console.log(`[${storeName}] 📡 Consultando Firebase para el pedido:`, orderId);
         const dbRef = appInstance.database().ref('orders/' + orderId);
-        
-        // Timeout para dbRef.once por si Firebase se queda colgado
-        const snap = await Promise.race([
-          dbRef.once('value'),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Firebase timeout')), 10000))
-        ]);
-        
-        console.log(`[${storeName}] 📡 Firebase respondió para el pedido:`, orderId);
+        const snap = await dbRef.once('value');
         const orderData = snap.val();
 
         if (!orderData || orderData.status !== 'pending') {
-          console.log(`[${storeName}] ⚠️ Pedido ya no está pendiente o no existe. Data:`, !!orderData);
-          try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado anteriormente o no existe.', show_alert: true }); } catch(e){ console.error('Error answerCallbackQuery', e); }
+          console.log(`[${storeName}] ⚠️ Pedido ya no está pendiente o no existe.`);
+          try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado anteriormente o no existe.', show_alert: true }); } catch(e){}
           telegramLocks.delete(orderId);
           return;
         }
