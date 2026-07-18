@@ -100,6 +100,116 @@ const bots = {
 console.log('✅ Bots de Telegram configurados.');
 
 // ========================================
+// 3.5 VIP CASHBACK & PUNTOS (Replica de data.js para el bot)
+// ========================================
+const VIP_TIERS = [
+  { max: 1, name: 'Novato', cashback: 0 },
+  { max: 20, name: 'BRONCE I', cashback: 0.2 },
+  { max: 40, name: 'BRONCE II', cashback: 0.4 },
+  { max: 60, name: 'BRONCE III', cashback: 0.6 },
+  { max: 80, name: 'BRONCE IV', cashback: 0.8 },
+  { max: 100, name: 'BRONCE V', cashback: 1.0 },
+  { max: 120, name: 'PLATA I', cashback: 1.2 },
+  { max: 140, name: 'PLATA II', cashback: 1.4 },
+  { max: 160, name: 'PLATA III', cashback: 1.6 },
+  { max: 180, name: 'PLATA IV', cashback: 1.8 },
+  { max: 200, name: 'PLATA V', cashback: 2.0 },
+  { max: 220, name: 'ORO I', cashback: 2.2 },
+  { max: 240, name: 'ORO II', cashback: 2.4 },
+  { max: 260, name: 'ORO III', cashback: 2.6 },
+  { max: 280, name: 'ORO IV', cashback: 2.8 },
+  { max: 300, name: 'ORO V', cashback: 3.0 },
+  { max: 320, name: 'DIAMANTE I', cashback: 3.2 },
+  { max: 340, name: 'DIAMANTE II', cashback: 3.4 },
+  { max: 360, name: 'DIAMANTE III', cashback: 3.6 },
+  { max: 380, name: 'DIAMANTE IV', cashback: 3.8 },
+  { max: Infinity, name: 'DIAMANTE V', cashback: 4.0 }
+];
+
+function getVipLevel(spent) {
+  for (let i = 0; i < VIP_TIERS.length; i++) {
+    if (spent < VIP_TIERS[i].max) {
+      return { name: VIP_TIERS[i].name, cashback: VIP_TIERS[i].cashback };
+    }
+  }
+  return { name: 'DIAMANTE V', cashback: 4.0 };
+}
+
+/**
+ * Aplica puntos AccessPoints y cashback VIP al usuario cuando un pedido es completado.
+ * Replica exactamente la lógica de updateOrderStatus en data.js del frontend.
+ * Solo se aplica a compras de productos (no wallet-recharge) y usuarios no-revendedores.
+ */
+async function applyVipRewards(orderData, appInstance, storeName) {
+  try {
+    // Solo aplicar a compras de productos (no recargas de monedero)
+    if (!orderData.userId || orderData.productType === 'wallet-recharge') return;
+
+    const price = parseFloat(orderData.priceUsd || 0);
+    if (price <= 0) return;
+
+    const userRef = appInstance.database().ref('users/' + orderData.userId);
+    const userSnap = await userRef.once('value');
+    const userData = userSnap.val();
+    if (!userData) return;
+
+    const role = userData.role || 'cliente';
+    if (role === 'revendedor') return;
+
+    // 1. Calcular puntos
+    let earnedPoints = 0;
+    if (price < 5) earnedPoints = 2;
+    else if (price <= 12) earnedPoints = 4;
+    else earnedPoints = 7;
+
+    // 2. Calcular nuevo totalSpent y cashback
+    const currentSpent = parseFloat(userData.totalSpent || 0);
+    const newSpent = currentSpent + price;
+
+    let cashbackAmount = 0;
+    let cashbackPercent = 0;
+
+    // Solo dar cashback si NO se usó código de descuento
+    if (!orderData.discountCode) {
+      const vip = getVipLevel(newSpent);
+      cashbackPercent = vip.cashback || 0;
+      if (cashbackPercent > 0) {
+        cashbackAmount = price * (cashbackPercent / 100);
+      }
+    }
+
+    // 3. Aplicar todo con transacción atómica para evitar race conditions
+    await userRef.transaction(current => {
+      if (current === null) return current;
+
+      current.totalSpent = (parseFloat(current.totalSpent) || 0) + price;
+      current.points = (current.points || 0) + earnedPoints;
+
+      if (cashbackAmount > 0) {
+        current.wallet = (parseFloat(current.wallet) || 0) + cashbackAmount;
+      }
+
+      return current;
+    });
+
+    // 4. Registrar la transacción de cashback en el historial (fuera de la transacción)
+    if (cashbackAmount > 0) {
+      await appInstance.database().ref('users/' + orderData.userId + '/transactions').push({
+        id: Date.now().toString(),
+        type: 'deposit',
+        amount: cashbackAmount,
+        description: `Cashback VIP (${cashbackPercent.toFixed(1)}%) por pedido #${orderData.id}`,
+        date: Date.now()
+      });
+    }
+
+    console.log(`🎯 [${storeName}] VIP aplicado a ${orderData.userId}: +${earnedPoints} PTS, totalSpent=$${newSpent.toFixed(2)}${cashbackAmount > 0 ? `, cashback=$${cashbackAmount.toFixed(4)}` : ''}`);
+  } catch (e) {
+    console.error(`❌ [${storeName}] Error aplicando VIP rewards para #${orderData.id}:`, e.message);
+  }
+}
+
+// ========================================
 // 4. FUNCIONES AUXILIARES (DESCARGA DE IMAGEN Y OCR)
 // ========================================
 
@@ -895,6 +1005,11 @@ Object.keys(bots).forEach(storeName => {
           await botConfig.bot.answerCallbackQuery(query.id, { text: `Resultado: ${buttonText}` });
           console.log(`✅ [${storeName}] Pedido #${orderId} procesado desde Telegram: ${buttonText}`);
           
+          // Aplicar puntos y cashback VIP cuando el pedido se completa
+          if (newStatus === 'completed') {
+            await applyVipRewards(orderData, appInstance, storeName);
+          }
+
           if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
               const codeMsg = `🤖 <b>ENTREGA DE CÓDIGO — #${orderId}</b>\n\n${adminNote}`;
               await botConfig.bot.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
@@ -1071,6 +1186,14 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
             const targetChat = chatId || botConfig.chatId;
             const codeMsg = `🤖 <b>ENTREGA AUTOMÁTICA — #${orderId}</b>\n\n${adminNote}`;
             await botConfig.bot.sendMessage(targetChat, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
+        }
+
+        // Aplicar puntos y cashback VIP cuando el pedido se completa por polling API
+        if (newStatus === 'completed') {
+            const appInstance = storeApps[storeName];
+            if (appInstance) {
+                await applyVipRewards(orderData, appInstance, storeName);
+            }
         }
     } catch(e) {
         console.error(`❌ [${storeName}] Error editando/enviando msj en polling para #${orderId}`, e.message);
