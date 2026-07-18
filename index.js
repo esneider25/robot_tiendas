@@ -99,6 +99,16 @@ const bots = {
 
 console.log('✅ Bots de Telegram configurados.');
 
+Object.keys(bots).forEach(storeName => {
+  const botConfig = bots[storeName];
+  if (botConfig && botConfig.bot) {
+    botConfig.bot.deleteWebHook().catch(e => console.error(`[${storeName}] Error borrando webhook:`, e.message));
+    botConfig.bot.on('polling_error', (error) => {
+      console.error(`[${storeName}] Error de Polling:`, error.message);
+    });
+  }
+});
+
 // ========================================
 // 3.5 VIP CASHBACK & PUNTOS (Replica de data.js para el bot)
 // ========================================
