@@ -942,122 +942,125 @@ Object.keys(bots).forEach(storeName => {
   const botConfig = bots[storeName];
   botConfig.bot.on('callback_query', async (query) => {
     console.log(`[${storeName}] ➡️ Recibido callback_query:`, query.data);
+
+    // ✅ FIX CRÍTICO: Responder a Telegram INMEDIATAMENTE para que el botón
+    // no quede cargando. Hacemos todo el procesamiento DESPUÉS de esto.
+    // Telegram requiere respuesta en <60s, pero con API calls y Firebase
+    // podemos exceder ese límite. Responder ya elimina el spinner.
+    try { await botConfig.bot.answerCallbackQuery(query.id); } catch(e) {
+      console.warn(`[${storeName}] ⚠️ answerCallbackQuery inicial falló (puede ser query expirada):`, e.message);
+    }
+
     try {
       const data = query.data || '';
+
+      // Sin mensaje asociado (puede pasar con mensajes muy viejos)
       if (!query.message) {
-        console.log(`[${storeName}] ⚠️ Callback sin mensaje asociado.`);
+        console.log(`[${storeName}] ⚠️ Callback sin mensaje asociado. Ignorado.`);
         return;
       }
 
       const chatId = query.message.chat.id;
       const messageId = query.message.message_id;
 
-      if (data === 'ignore' || data === 'noop') {
-        try { await botConfig.bot.answerCallbackQuery(query.id); } catch(e){}
-        return;
-      }
+      // Botones informativos - ya se respondió arriba, solo salir
+      if (data === 'ignore' || data === 'noop') return;
 
+      // Datos desconocidos - ignorar silenciosamente
       if (!data.startsWith('approve_') && !data.startsWith('reject_') && !data.startsWith('rejectreason_') && !data.startsWith('cancelreject_')) {
         console.log(`[${storeName}] ⚠️ Callback data ignorado:`, data);
         return;
       }
 
+      // ── CANCELAR RECHAZO ──
       if (data.startsWith('cancelreject_')) {
-          const orderId = data.replace('cancelreject_', '');
+        const orderId = data.replace('cancelreject_', '');
+        const newMarkup = {
+          inline_keyboard: [
+            [
+              { text: '✅ Aprobar', callback_data: `approve_${orderId}` },
+              { text: '❌ Rechazar', callback_data: `reject_${orderId}` }
+            ],
+            [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+          ]
+        };
+        try {
+          await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+        } catch(e) { console.error(`[${storeName}] Error editando markup en cancelreject:`, e.message); }
+        return;
+      }
+
+      // ── MOTIVO DE RECHAZO ──
+      if (data.startsWith('rejectreason_')) {
+        const rest = data.substring('rejectreason_'.length);
+        const lastUnderscore = rest.lastIndexOf('_');
+        const orderId = rest.substring(0, lastUnderscore);
+        const reasonCode = rest.substring(lastUnderscore + 1);
+        const appInstance = storeApps[storeName];
+
+        let rejectMsg = 'Pedido rechazado';
+        if (reasonCode === 'monto') rejectMsg = '💰 Monto Incompleto';
+        else if (reasonCode === 'duplicado') rejectMsg = '⚠️ Pago duplicado';
+        else if (reasonCode === 'captura') rejectMsg = '🖼️ Error captura no cargó, enviar el pago nuevamente';
+        else if (reasonCode === 'general') rejectMsg = '🚫 Pedido rechazado';
+
+        try {
+          const dbRef = appInstance.database().ref('orders/' + orderId);
+          const snap = await dbRef.once('value');
+          const orderData = snap.val();
+
+          if (!orderData || orderData.status !== 'pending') {
+            try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado.', show_alert: true }); } catch(e){}
+            return;
+          }
+
+          const statusHistory = orderData.statusHistory || [];
+          statusHistory.push({ status: 'rejected', timestamp: new Date().toISOString(), note: rejectMsg });
+
+          await dbRef.update({
+            status: 'rejected', adminNote: rejectMsg, rejectReason: rejectMsg,
+            updatedAt: new Date().toISOString(), statusHistory
+          });
+
+          // Reembolso si pagó con monedero
+          if (orderData.paymentMethodId === 'wallet' && orderData.userId && orderData.productType !== 'wallet-recharge') {
+            try {
+              const walletRef = appInstance.database().ref('users/' + orderData.userId + '/wallet');
+              const walletSnap = await walletRef.once('value');
+              const amountToRefund = parseFloat(orderData.priceUsd || 0);
+              await walletRef.set((parseFloat(walletSnap.val() || 0)) + amountToRefund);
+              await appInstance.database().ref('users/' + orderData.userId + '/transactions').push({
+                id: Date.now().toString(), type: 'deposit', amount: amountToRefund,
+                description: `Pago reembolsado por pedido rechazado (#${orderData.id})`, date: Date.now()
+              });
+              console.log(`💸 Reembolso de $${amountToRefund} aplicado a ${orderData.userId}`);
+            } catch(e) { console.error('Error reembolsando monedero:', e); }
+          }
+
           const newMarkup = {
             inline_keyboard: [
-               [
-                 { text: '✅ Aprobar', callback_data: `approve_${orderId}` },
-                 { text: '❌ Rechazar', callback_data: `reject_${orderId}` }
-               ],
-               [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+              [{ text: `❌ ${rejectMsg.toUpperCase()}`, callback_data: 'noop' }],
+              [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
             ]
           };
-          await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
-          await botConfig.bot.answerCallbackQuery(query.id, { text: 'Operación cancelada.' });
-          return;
-      }
-
-      if (data.startsWith('rejectreason_')) {
-          const actionPrefix = 'rejectreason_';
-          const rest = data.substring(actionPrefix.length);
-          const lastUnderscore = rest.lastIndexOf('_');
-          const orderId = rest.substring(0, lastUnderscore);
-          const reasonCode = rest.substring(lastUnderscore + 1);
-          const appInstance = storeApps[storeName];
-          
-          let rejectMsg = 'Pedido rechazado';
-          if (reasonCode === 'monto') rejectMsg = '💰 Monto Incompleto';
-          else if (reasonCode === 'duplicado') rejectMsg = '⚠️ Pago duplicado';
-          else if (reasonCode === 'captura') rejectMsg = '🖼️ Error captura no cargó, enviar el pago nuevamente';
-          else if (reasonCode === 'general') rejectMsg = '🚫 Pedido rechazado';
-
-          try {
-            const dbRef = appInstance.database().ref('orders/' + orderId);
-            const snap = await dbRef.once('value');
-            const orderData = snap.val();
-            
-            if (!orderData || orderData.status !== 'pending') {
-              try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado.', show_alert: true }); } catch(e){}
-              return;
-            }
-
-            const statusHistory = orderData.statusHistory || [];
-            statusHistory.push({
-              status: 'rejected',
-              timestamp: new Date().toISOString(),
-              note: rejectMsg
-            });
-
-            await dbRef.update({
-               status: 'rejected',
-               adminNote: rejectMsg,
-               rejectReason: rejectMsg,
-               updatedAt: new Date().toISOString(),
-               statusHistory: statusHistory
-            });
-
-            if (orderData.paymentMethodId === 'wallet' && orderData.userId && orderData.productType !== 'wallet-recharge') {
-              try {
-                const walletRef = appInstance.database().ref('users/' + orderData.userId + '/wallet');
-                const walletSnap = await walletRef.once('value');
-                const currentWallet = parseFloat(walletSnap.val() || 0);
-                const amountToRefund = parseFloat(orderData.priceUsd || 0);
-                await walletRef.set(currentWallet + amountToRefund);
-                
-                await appInstance.database().ref('users/' + orderData.userId + '/transactions').push({
-                  id: Date.now().toString(),
-                  type: 'deposit',
-                  amount: amountToRefund,
-                  description: `Pago reembolsado por pedido rechazado (#${orderData.id})`,
-                  date: Date.now()
-                });
-                console.log(`💸 Reembolso de $${amountToRefund} aplicado a ${orderData.userId}`);
-              } catch(e) { console.error('Error reembolsando monedero:', e); }
-            }
-            
-            const newMarkup = {
-              inline_keyboard: [
-                 [{ text: `❌ ${rejectMsg.toUpperCase()}`, callback_data: 'noop' }],
-                 [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
-              ]
-            };
-            await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
-            await botConfig.bot.answerCallbackQuery(query.id, { text: 'Pedido rechazado y cliente notificado.' });
-            console.log(`❌ [${storeName}] Pedido #${orderId} RECHAZADO: ${rejectMsg}`);
-          } catch(e) {
-            console.error(e);
+          try { await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId }); } catch(e) {
+            console.error(`[${storeName}] Error editando markup en rejectreason:`, e.message);
           }
-          return;
+          console.log(`❌ [${storeName}] Pedido #${orderId} RECHAZADO: ${rejectMsg}`);
+        } catch(e) {
+          console.error(`[${storeName}] Error en rejectreason para #${orderId}:`, e.message);
+        }
+        return;
       }
 
-      const action = data.split('_')[0]; // "approve" o "reject"
-      const orderId = data.substring(action.length + 1); // Extraer el ID
+      // ── APROBAR / RECHAZAR (mostrar motivos) ──
+      const action = data.split('_')[0];
+      const orderId = data.substring(action.length + 1);
       const appInstance = storeApps[storeName];
 
       if (telegramLocks.has(orderId)) {
         console.log(`[${storeName}] ⏳ Bloqueado por telegramLocks:`, orderId);
-        try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⏳ Procesando pedido, por favor espera...' }); } catch(e){}
+        try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⏳ Ya se está procesando este pedido...' }); } catch(e){}
         return;
       }
       telegramLocks.add(orderId);
@@ -1070,71 +1073,19 @@ Object.keys(bots).forEach(storeName => {
         const orderData = snap.val();
 
         if (!orderData || orderData.status !== 'pending') {
-          console.log(`[${storeName}] ⚠️ Pedido ya no está pendiente o no existe.`);
-          try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Este pedido ya fue procesado anteriormente o no existe.', show_alert: true }); } catch(e){}
-          telegramLocks.delete(orderId);
+          console.log(`[${storeName}] ⚠️ Pedido no existe o ya procesado: #${orderId}`);
+          try {
+            await botConfig.bot.editMessageReplyMarkup(
+              { inline_keyboard: [[{ text: '⚠️ Pedido ya procesado o no existe', callback_data: 'noop' }], [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]] },
+              { chat_id: chatId, message_id: messageId }
+            );
+          } catch(e) {}
           return;
         }
-        
-        if (action === 'approve') {
-          console.log(`[${storeName}] ✅ Procesando aprobación para:`, orderId);
-          let newStatus = 'completed';
-          let buttonText = '✅ PEDIDO APROBADO';
-          let adminNote = 'Pedido realizado exitosamente';
 
-          if (orderData && orderData.apiProvider !== undefined && orderData.apiProvider !== null) {
-            console.log(`[${storeName}] 🤖 Pedido tiene API configurada, intentando procesar...`);
-            try {
-              const apiRes = await processApiTopupFromTelegram(orderData, appInstance);
-              console.log(`[${storeName}] 🤖 Respuesta API:`, apiRes);
-              newStatus = apiRes.status;
-              buttonText = apiRes.msg;
-              adminNote = apiRes.dbNote || adminNote;
-            } catch(e) { console.error('Error procesando API desde bot', e); }
-          }
-
-          const statusHistory = orderData.statusHistory || [];
-          statusHistory.push({
-            status: newStatus,
-            timestamp: new Date().toISOString(),
-            note: adminNote
-          });
-
-          console.log(`[${storeName}] 💾 Actualizando BD a status:`, newStatus);
-          await dbRef.update({
-             status: newStatus,
-             adminNote: adminNote,
-             updatedAt: new Date().toISOString(),
-             statusHistory: statusHistory
-          });
-
-          // Editar los botones del mensaje para mostrar el resultado
-          const newMarkup = {
-            inline_keyboard: [
-               [{ text: buttonText, callback_data: 'noop' }],
-               [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
-            ]
-          };
-          console.log(`[${storeName}] 💬 Enviando markup y answerCallbackQuery...`);
-          await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
-          await botConfig.bot.answerCallbackQuery(query.id, { text: `Resultado: ${buttonText}` });
-          console.log(`✅ [${storeName}] Pedido #${orderId} procesado desde Telegram: ${buttonText}`);
-          
-          // Aplicar puntos y cashback VIP cuando el pedido se completa
-          if (newStatus === 'completed') {
-            await applyVipRewards(orderData, appInstance, storeName);
-          }
-
-          if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
-              const codeMsg = `🤖 <b>ENTREGA DE CÓDIGO — #${orderId}</b>\n\n${adminNote}`;
-              await botConfig.bot.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
-          }
-
-          if (newStatus === 'processing') {
-              pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId);
-          }
-        } else if (action === 'reject') {
-          console.log(`[${storeName}] ❌ Procesando rechazo (mostrando opciones) para:`, orderId);
+        if (action === 'reject') {
+          // Mostrar menú de motivos de rechazo
+          console.log(`[${storeName}] ❌ Mostrando opciones de rechazo para:`, orderId);
           const newMarkup = {
             inline_keyboard: [
               [{ text: '💰 Monto Incompleto', callback_data: `rejectreason_${orderId}_monto` }],
@@ -1144,20 +1095,81 @@ Object.keys(bots).forEach(storeName => {
               [{ text: '🔙 Cancelar', callback_data: `cancelreject_${orderId}` }]
             ]
           };
-          await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
-          await botConfig.bot.answerCallbackQuery(query.id, { text: 'Selecciona el motivo del rechazo:' });
-          console.log(`[${storeName}] ✨ Opciones de rechazo enviadas.`);
+          try {
+            await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+            console.log(`[${storeName}] ✨ Opciones de rechazo enviadas para #${orderId}.`);
+          } catch(e) { console.error(`[${storeName}] Error mostrando opciones de rechazo:`, e.message); }
+
+        } else if (action === 'approve') {
+          console.log(`[${storeName}] ✅ Procesando aprobación para:`, orderId);
+          let newStatus = 'completed';
+          let buttonText = '✅ PEDIDO APROBADO';
+          let adminNote = 'Pedido realizado exitosamente';
+
+          // Mostrar botón de cargando mientras procesa la API (solo si tiene apiProvider)
+          const hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '';
+          if (hasApi) {
+            try {
+              await botConfig.bot.editMessageReplyMarkup(
+                { inline_keyboard: [[{ text: '⏳ Procesando recarga...', callback_data: 'noop' }], [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]] },
+                { chat_id: chatId, message_id: messageId }
+              );
+            } catch(e) {}
+
+            console.log(`[${storeName}] 🤖 Pedido tiene API configurada, intentando procesar...`);
+            try {
+              const apiRes = await processApiTopupFromTelegram(orderData, appInstance);
+              console.log(`[${storeName}] 🤖 Respuesta API:`, apiRes);
+              newStatus = apiRes.status;
+              buttonText = apiRes.msg;
+              adminNote = apiRes.dbNote || adminNote;
+            } catch(e) { console.error(`[${storeName}] Error en API desde bot:`, e); }
+          }
+
+          const statusHistory = orderData.statusHistory || [];
+          statusHistory.push({ status: newStatus, timestamp: new Date().toISOString(), note: adminNote });
+
+          console.log(`[${storeName}] 💾 Actualizando BD a status:`, newStatus);
+          await dbRef.update({
+            status: newStatus, adminNote, updatedAt: new Date().toISOString(), statusHistory
+          });
+
+          const finalMarkup = {
+            inline_keyboard: [
+              [{ text: buttonText, callback_data: 'noop' }],
+              [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+            ]
+          };
+          try {
+            await botConfig.bot.editMessageReplyMarkup(finalMarkup, { chat_id: chatId, message_id: messageId });
+          } catch(e) { console.error(`[${storeName}] Error actualizando markup final:`, e.message); }
+          console.log(`✅ [${storeName}] Pedido #${orderId} aprobado: ${buttonText}`);
+
+          if (newStatus === 'completed') await applyVipRewards(orderData, appInstance, storeName);
+
+          if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
+            const codeMsg = `🤖 <b>ENTREGA DE CÓDIGO — #${orderId}</b>\n\n${adminNote}`;
+            await botConfig.bot.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
+          }
+
+          if (newStatus === 'processing') {
+            pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId);
+          }
         }
       } catch (e) {
-        console.error(`Error procesando callback para ${orderId}:`, e);
-        try { await botConfig.bot.answerCallbackQuery(query.id, { text: 'Hubo un error interno. Intenta de nuevo.', show_alert: true }); } catch(err) {}
+        console.error(`[${storeName}] Error procesando callback para #${orderId}:`, e.message);
+        try {
+          await botConfig.bot.editMessageReplyMarkup(
+            { inline_keyboard: [[{ text: '❌ Error interno — intenta de nuevo', callback_data: 'noop' }], [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]] },
+            { chat_id: chatId, message_id: messageId }
+          );
+        } catch(err) {}
       } finally {
-        telegramLocks.delete(orderId); // Liberar el candado
+        telegramLocks.delete(orderId);
         console.log(`[${storeName}] 🔓 Lock liberado para:`, orderId);
       }
     } catch (criticalError) {
-      console.error(`[${storeName}] 💥 ERROR CRÍTICO NO CONTROLADO en callback_query:`, criticalError);
-      try { await botConfig.bot.answerCallbackQuery(query.id, { text: 'Error de sistema.', show_alert: true }); } catch(err) {}
+      console.error(`[${storeName}] 💥 ERROR CRÍTICO en callback_query:`, criticalError.message);
     }
   });
 });
