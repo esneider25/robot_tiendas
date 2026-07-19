@@ -306,6 +306,113 @@ async function performOCR(imageBuffer) {
 }
 
 // ========================================
+// 4.5 SISTEMA ANTI-XSS Y LIMPIEZA AUTOMÁTICA
+// ========================================
+
+// Patrones sospechosos que indican inyección XSS / ataques
+const XSS_PATTERNS = [
+  /<script/i,
+  /javascript\s*:/i,
+  /on(?:error|load|click|mouseover|focus|blur)\s*=/i,
+  /eval\s*\(/i,
+  /document\./i,
+  /window\./i,
+  /\.src\s*=/i,
+  /fetch\s*\(/i,
+  /XMLHttpRequest/i,
+  /\.cookie/i,
+  /atob\s*\(/i,
+  /btoa\s*\(/i,
+  /String\.fromCharCode/i,
+  /\balert\s*\(/i,
+  /\bprompt\s*\(/i,
+  /\bconfirm\s*\(/i,
+  /getIdToken/i,
+  /\.auth\(\)/i,
+  /webhook\./i,
+  /new\s+Image\s*\(/i,
+  /encodeURIComponent/i,
+  /<img[^>]+onerror/i,
+  /<iframe/i,
+  /<svg[^>]+onload/i
+];
+
+/**
+ * Detecta si un pedido contiene payloads XSS/inyección en cualquiera de sus campos de texto.
+ * Revisa: gameId, playerName, customerContact, accountEmail, productName, packageLabel, adminNote
+ */
+function isSuspiciousOrder(order) {
+  if (!order) return false;
+  const fieldsToCheck = [
+    order.gameId, order.playerName, order.customerContact,
+    order.accountEmail, order.productName, order.packageLabel,
+    order.adminNote, order.id
+  ];
+  for (const field of fieldsToCheck) {
+    if (!field || typeof field !== 'string') continue;
+    for (const pattern of XSS_PATTERNS) {
+      if (pattern.test(field)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Limpieza automática al iniciar: busca y elimina pedidos con IDs tipo XSS
+ * o contenido malicioso de las 3 bases de datos.
+ */
+async function cleanupMaliciousOrders() {
+  console.log('\n🧹 Iniciando limpieza de pedidos maliciosos (XSS)...');
+  const stores = [
+    { name: 'CandyStore', app: candyStoreApp },
+    { name: 'RecargaShark', app: recargaSharkApp },
+    { name: 'AccessPlay', app: accessPlayApp }
+  ];
+
+  let totalDeleted = 0;
+
+  for (const store of stores) {
+    try {
+      const ordersRef = store.app.database().ref('orders');
+      const snapshot = await ordersRef.once('value');
+      const allOrders = snapshot.val();
+      if (!allOrders) continue;
+
+      const toDelete = [];
+      for (const [orderId, orderData] of Object.entries(allOrders)) {
+        // Criterio 1: El ID contiene "XSS" (pedidos de test)
+        const hasXssId = /xss/i.test(orderId);
+        // Criterio 2: El contenido tiene payloads maliciosos
+        const hasMaliciousContent = isSuspiciousOrder(orderData);
+
+        if (hasXssId || hasMaliciousContent) {
+          toDelete.push(orderId);
+        }
+      }
+
+      if (toDelete.length > 0) {
+        console.log(`🚨 [${store.name}] Encontrados ${toDelete.length} pedidos maliciosos. Eliminando...`);
+        const updates = {};
+        for (const id of toDelete) {
+          updates[id] = null; // null = eliminar en Firebase
+          console.log(`   🗑️ Eliminando: #${id}`);
+        }
+        await ordersRef.update(updates);
+        totalDeleted += toDelete.length;
+        console.log(`✅ [${store.name}] ${toDelete.length} pedidos maliciosos eliminados.`);
+      } else {
+        console.log(`✅ [${store.name}] Limpio. No se encontraron pedidos maliciosos.`);
+      }
+    } catch (err) {
+      console.error(`❌ [${store.name}] Error durante limpieza:`, err.message);
+    }
+  }
+
+  console.log(`🧹 Limpieza completada. Total eliminados: ${totalDeleted}\n`);
+  return totalDeleted;
+}
+
+// ========================================
 // 5. PROCESAMIENTO PRINCIPAL DE PEDIDOS
 // ========================================
 
@@ -346,6 +453,13 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
   const order = snapshot.val();
 
   if (!order || order.botProcessed) return;
+
+  // 🛡️ FILTRO ANTI-XSS: Detectar y eliminar pedidos con payloads maliciosos
+  if (/xss/i.test(orderId) || isSuspiciousOrder(order)) {
+    console.log(`🚨 [Seguridad] Pedido MALICIOSO detectado: #${orderId}. Eliminando de la base de datos...`);
+    await dbRef.remove();
+    return;
+  }
 
   // Filtrar pedidos antiguos (más de 6 horas) que no fueron procesados por el bot (para evitar spam en reinicios)
   if (order.createdAt) {
@@ -1307,5 +1421,8 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
   }, 5000);
 }
 
-// Iniciar el sistema
-startListening();
+// Iniciar el sistema: primero limpiar pedidos maliciosos, luego escuchar
+(async () => {
+  await cleanupMaliciousOrders();
+  startListening();
+})();
