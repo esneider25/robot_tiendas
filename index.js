@@ -1433,8 +1433,106 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
   }, 5000);
 }
 
-// Iniciar el sistema: primero limpiar pedidos maliciosos, luego escuchar
+/**
+ * Borra cualquier webhook activo en todos los bots.
+ * IMPORTANTE: Si un bot tiene webhook, los callback_queries van al webhook
+ * y el polling NUNCA los recibe. Esto congela los botones de Telegram.
+ */
+async function clearAllWebhooks() {
+  console.log('\n🔗 Verificando y borrando webhooks activos...');
+  for (const [storeName, botConfig] of Object.entries(bots)) {
+    try {
+      const info = await botConfig.bot.getWebHookInfo();
+      if (info && info.url && info.url.length > 0) {
+        console.log(`⚠️  [${storeName}] Webhook ACTIVO detectado: ${info.url}`);
+        await botConfig.bot.deleteWebHook();
+        console.log(`✅ [${storeName}] Webhook eliminado. Ahora usa polling correctamente.`);
+      } else {
+        console.log(`✅ [${storeName}] Sin webhook. Polling activo.`);
+      }
+    } catch(e) {
+      console.error(`❌ [${storeName}] Error verificando webhook:`, e.message);
+    }
+  }
+  console.log('🔗 Verificación de webhooks completada.\n');
+}
+
+/**
+ * Repara los botones congelados en Telegram.
+ * Busca pedidos 'pending' que ya tienen telegramMessageId y les
+ * vuelve a aplicar los botones Aprobar/Rechazar.
+ * Esto descongela los mensajes viejos que quedaron sin responder.
+ */
+async function repairFrozenButtons() {
+  console.log('\n🔧 Reparando botones congelados en Telegram...');
+  const stores = [
+    { name: 'CandyStore', app: candyStoreApp },
+    { name: 'RecargaShark', app: recargaSharkApp },
+    { name: 'AccessPlay', app: accessPlayApp }
+  ];
+
+  let totalRepaired = 0;
+
+  for (const store of stores) {
+    const botConfig = bots[store.name];
+    if (!botConfig || !botConfig.chatId) continue;
+
+    try {
+      const ordersRef = store.app.database().ref('orders');
+      const snapshot = await ordersRef.once('value');
+      const allOrders = snapshot.val();
+      if (!allOrders) continue;
+
+      for (const [orderId, orderData] of Object.entries(allOrders)) {
+        // Solo reparar pedidos pending que ya tienen mensaje de Telegram
+        if (orderData.status !== 'pending' || !orderData.telegramMessageId || !orderData.botProcessed) continue;
+        // Saltar pedidos de monedero (no necesitan botones manuales)
+        if (orderData.paymentMethodId === 'wallet') continue;
+
+        try {
+          const repairMarkup = {
+            inline_keyboard: [
+              [
+                { text: '✅ Aprobar', callback_data: `approve_${orderId}` },
+                { text: '❌ Rechazar', callback_data: `reject_${orderId}` }
+              ],
+              [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+            ]
+          };
+          await botConfig.bot.editMessageReplyMarkup(
+            repairMarkup,
+            { chat_id: botConfig.chatId, message_id: orderData.telegramMessageId }
+          );
+          totalRepaired++;
+          console.log(`🔧 [${store.name}] Botón reparado: #${orderId} (msg ${orderData.telegramMessageId})`);
+          // Pequeña pausa para no saturar la API de Telegram
+          await new Promise(r => setTimeout(r, 300));
+        } catch(e) {
+          if (!e.message.includes('not modified') && !e.message.includes('message to edit not found')) {
+            console.warn(`⚠️  [${store.name}] No se pudo reparar #${orderId}:`, e.message);
+          }
+        }
+      }
+    } catch(err) {
+      console.error(`❌ [${store.name}] Error durante reparación de botones:`, err.message);
+    }
+  }
+
+  if (totalRepaired > 0) {
+    console.log(`🔧 Reparación completada. ${totalRepaired} botón(es) restaurados.\n`);
+  } else {
+    console.log('🔧 No se encontraron botones que reparar.\n');
+  }
+}
+
+// Iniciar el sistema:
+// 1. Borrar webhooks (para asegurarse de que el polling funcione)
+// 2. Limpiar pedidos maliciosos (XSS)
+// 3. Reparar botones congelados en mensajes viejos
+// 4. Iniciar los listeners en tiempo real
 (async () => {
+  await clearAllWebhooks();
   await cleanupMaliciousOrders();
+  await repairFrozenButtons();
   startListening();
 })();
