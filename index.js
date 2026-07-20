@@ -266,12 +266,22 @@ async function performOCR(imageBuffer) {
     console.log('📝 Texto extraído por OCR:\n', text);
 
     // Normalizar texto (minúsculas y sin acentos básicos)
-    const normalizedText = text.toLowerCase()
+    let normalizedText = text.toLowerCase()
       .replace(/[áäâà]/g, 'a').replace(/[éëêè]/g, 'e').replace(/[íïîì]/g, 'i')
       .replace(/[óöôò]/g, 'o').replace(/[úüûù]/g, 'u');
 
+    // Corregir errores comunes de OCR en números (o -> 0, i/l -> 1, s -> 5, b -> 8) si están pegados a otros números
+    normalizedText = normalizedText
+      .replace(/(?<=\d)o|o(?=\d)/g, '0')
+      .replace(/(?<=\d)[il]|[il](?=\d)/g, '1')
+      .replace(/(?<=\d)s|s(?=\d)/g, '5')
+      .replace(/(?<=\d)z|z(?=\d)/g, '2')
+      .replace(/(?<=\d)b|b(?=\d)/g, '8')
+      .replace(/(?<=\d)g|g(?=\d)/g, '9');
+
     // Expresión regular mejorada para bancos (incluye recibo, comprobante, transaccion)
-    const keywordRegex = /(?:referencia|ref\.|ref|recibo|comprobante|transaccion|aprobacion|numero\s+de\s+operacion|operacion|tipo\s+de\s+operacion|numero\s+de\s+referencia)[\s\S]{0,35}?(\d{4,25})/gi;
+    // Se cambia a \d{5,25} para EVITAR capturar años (ej. 2024, 2026) que tienen 4 dígitos
+    const keywordRegex = /(?:referencia|ref\.|ref|recibo|comprobante|transaccion|aprobacion|numero\s+de\s+operacion|operacion|tipo\s+de\s+operacion|numero\s+de\s+referencia)[\s\S]{0,35}?(\d{5,25})/gi;
     
     let ocrNumbers = [];
     let match;
