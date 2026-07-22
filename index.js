@@ -642,6 +642,11 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
           updatedAt: new Date().toISOString(),
           statusHistory: statusHistory
         });
+        
+        if (apiRes.status === 'completed') {
+          await applyVipRewards(order, appInstance, storeName);
+        }
+
       } catch(e) {
         console.error('Error auto-disparando API para monedero:', e);
       }
