@@ -941,7 +941,50 @@ function startListening() {
       }
     });
 
-    console.log(`👂 Escuchando en tiempo real: ${store.name}`);
+    // =====================================
+    // LISTENER PARA MENSAJES DE SOPORTE
+    // =====================================
+    const messagesRef = store.app.database().ref('messages');
+    
+    const handleSupportMessage = async (snapshot) => {
+      const convData = snapshot.val();
+      const sessionId = snapshot.key;
+      
+      if (!convData || !convData.messages || !Array.isArray(convData.messages)) return;
+      
+      const lastMsgIndex = convData.messages.length - 1;
+      const lastMsg = convData.messages[lastMsgIndex];
+      
+      if (lastMsg && lastMsg.sender === 'user' && !lastMsg.telegramSent) {
+         try {
+           // Marcar como enviado en Firebase inmediatamente
+           await messagesRef.child(sessionId).child('messages').child(lastMsgIndex.toString()).update({ telegramSent: true });
+           
+           const storeConfig = bots[store.name];
+           if (storeConfig && storeConfig.bot && storeConfig.chatId) {
+             const escapeHtml = (text) => String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+             const contactInfo = convData.contact || 'Desconocido';
+             
+             const tgMsg = `💬 <b>Nuevo Mensaje de Soporte</b>\n\n<b>Contacto:</b> ${escapeHtml(contactInfo)}\n<b>Mensaje:</b> ${escapeHtml(lastMsg.text)}\n\n<i>Responde desde el Panel Admin</i>`;
+             
+             await storeConfig.bot.sendMessage(storeConfig.chatId, tgMsg, {
+               parse_mode: 'HTML',
+               reply_markup: {
+                 inline_keyboard: [[{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]]
+               }
+             });
+             console.log(`💬✅ [${store.name}] Notificación de soporte enviada a Telegram.`);
+           }
+         } catch (e) {
+           console.error(`❌ [${store.name}] Error enviando msj de soporte:`, e.message);
+         }
+      }
+    };
+
+    messagesRef.on('child_added', handleSupportMessage);
+    messagesRef.on('child_changed', handleSupportMessage);
+
+    console.log(`👂 Escuchando pedidos y mensajes en tiempo real: ${store.name}`);
   });
 
   console.log('🚀 CEREBRO CENTRAL EN LÍNEA Y ESPERANDO PEDIDOS...');
