@@ -596,24 +596,42 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
 
     try {
       ocrResult = await performOCR(imageBuffer);
-      if (ocrResult.length > 0) {
-        await dbRef.update({ ocrNumbers: ocrResult });
-        
-        // Buscar si esta referencia ya existe en otros pedidos (últimos 150 pedidos)
-        const snap = await dbRef.parent.orderByChild('createdAt').limitToLast(150).once('value');
-        const allOrders = snap.val() || {};
-        for (const [key, oldOrder] of Object.entries(allOrders)) {
-          if (key === order.id) continue;
-          if (oldOrder.ocrNumbers && Array.isArray(oldOrder.ocrNumbers)) {
-             const hasDuplicate = ocrResult.some(num => oldOrder.ocrNumbers.includes(num));
-             if (hasDuplicate) {
-               duplicateOrders.push(key);
-             }
-          }
+    } catch (e) {
+      console.error('❌ Error OCR:', e.message);
+    }
+  }
+
+  // Combinar referencias del OCR con las enviadas desde el frontend o ingresadas manualmente
+  let finalOcrNumbers = [...ocrResult];
+  if (Array.isArray(order.ocrNumbers)) {
+    order.ocrNumbers.forEach(num => {
+      if (num && !finalOcrNumbers.includes(String(num).trim())) {
+        finalOcrNumbers.push(String(num).trim());
+      }
+    });
+  }
+  if (order.manualRef && !finalOcrNumbers.includes(String(order.manualRef).trim())) {
+    finalOcrNumbers.push(String(order.manualRef).trim());
+  }
+
+  if (finalOcrNumbers.length > 0) {
+    await dbRef.update({ ocrNumbers: finalOcrNumbers });
+    
+    // Buscar si esta referencia ya existe en otros pedidos (últimos 150 pedidos)
+    try {
+      const snap = await dbRef.parent.orderByChild('createdAt').limitToLast(150).once('value');
+      const allOrders = snap.val() || {};
+      for (const [key, oldOrder] of Object.entries(allOrders)) {
+        if (key === order.id) continue;
+        if (oldOrder.ocrNumbers && Array.isArray(oldOrder.ocrNumbers)) {
+           const hasDuplicate = finalOcrNumbers.some(num => oldOrder.ocrNumbers.includes(num));
+           if (hasDuplicate) {
+             duplicateOrders.push(key);
+           }
         }
       }
     } catch (e) {
-      console.error('❌ Error OCR:', e.message);
+      console.error('Error buscando duplicados:', e);
     }
   }
 
@@ -653,7 +671,7 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
     }
   }
 
-  await sendTelegramNotification(order, storeName, ocrResult, imageBuffer, duplicateOrders, exifrWarning, dbRef);
+  await sendTelegramNotification(order, storeName, finalOcrNumbers, imageBuffer, duplicateOrders, exifrWarning, dbRef);
 
   if (order.status === 'processing' && order.paymentMethodId === 'wallet') {
       console.log(`[${storeName}] Pedido #${order.id} de monedero quedó PROCESANDO. Iniciando Polling automático.`);
@@ -694,7 +712,11 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
     msg += `🎁 <b>Descuento:</b> ${order.discountCode}\n`;
   }
 
-  const refText = ocrResult.length > 0 ? ocrResult.join(', ') : 'No detectado / Ver foto';
+  const isManual = !!(order.manualRef || (!order.screenshot && order.ocrNumbers && order.ocrNumbers.length > 0));
+  let refText = 'No detectado / Ver foto';
+  if (ocrResult && ocrResult.length > 0) {
+    refText = ocrResult.join(', ') + (isManual ? ' ✍️ (Manual)' : '');
+  }
   msg += `🔢 <b>Referencia Leída (OCR):</b> <code>${refText}</code>\n`;
   
   if (duplicateOrders.length > 0) {
