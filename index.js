@@ -210,6 +210,90 @@ async function applyVipRewards(orderData, appInstance, storeName) {
   }
 }
 
+// --- NUEVA LÓGICA AGREGADA PARA REFERIDOS Y RECARGAS DE MONEDERO ---
+async function applyWalletAndReferralRewards(orderData, appInstance, storeName) {
+  try {
+    if (!orderData.userId) return;
+    const db = appInstance.database();
+    const price = parseFloat(orderData.priceUsd || 0);
+
+    // 1. Lógica de Recarga de Monedero
+    if (orderData.productType === 'wallet-recharge') {
+      await db.ref('users/' + orderData.userId + '/wallet').transaction(current => {
+        return (parseFloat(current) || 0) + price;
+      });
+      await db.ref('users/' + orderData.userId + '/transactions').push({
+        id: Date.now().toString(),
+        type: 'deposit',
+        amount: price,
+        description: 'Recarga de monedero aprobada (Bot)',
+        date: Date.now()
+      });
+      console.log(`💰 [${storeName}] Recarga de monedero de $${price} aplicada al usuario ${orderData.userId}`);
+    }
+
+    // 2. Lógica de Referidos (Aplica tanto a recargas como a compras)
+    const userSnap = await db.ref('users/' + orderData.userId).once('value');
+    const p = userSnap.val() || {};
+    if (p.referredBy) {
+      const refQuerySnap = await db.ref('users').orderByChild('referralCode').equalTo(p.referredBy).once('value');
+      if (refQuerySnap.exists()) {
+        const referrerUid = Object.keys(refQuerySnap.val())[0];
+        const referrerData = refQuerySnap.val()[referrerUid];
+        
+        const referrerRole = referrerData.role || 'cliente';
+        if (referrerRole === 'cliente' || referrerRole === 'influencer' || referrerRole === 'partner') {
+          const maxReferrals = (referrerRole === 'influencer' || referrerRole === 'partner') ? (referrerData.referralLimit || 100) : 10;
+          let refCount = referrerData.referralsCount || 0;
+          let referrerReward = 0;
+          let isFirst = false;
+
+          if (!p.hasMadeFirstPurchase) {
+            if (refCount >= maxReferrals) {
+              await db.ref('users/' + orderData.userId).update({ referredBy: null, hasMadeFirstPurchase: true });
+              return;
+            }
+            referrerReward = 12;
+            isFirst = true;
+            await db.ref('users/' + orderData.userId).update({ hasMadeFirstPurchase: true });
+          } else {
+            let baseReward = referrerRole === 'partner' ? 3 : 2;
+            if (price >= 2) referrerReward = baseReward;
+            else referrerReward = 1;
+          }
+
+          if (referrerReward > 0) {
+            if (isFirst) refCount++;
+            
+            await db.ref('users/' + referrerUid).transaction(refUser => {
+              if (refUser === null) return refUser;
+              refUser.points = (refUser.points || 0) + referrerReward;
+              refUser.referralsCount = isFirst ? (refUser.referralsCount || 0) + 1 : (refUser.referralsCount || 0);
+              refUser.referralsEarnedPoints = (refUser.referralsEarnedPoints || 0) + referrerReward;
+              if (referrerRole === 'influencer' && (refUser.referralsCount || 0) >= 100) {
+                refUser.role = 'partner';
+              }
+              return refUser;
+            });
+
+            await db.ref('users/' + referrerUid + '/transactions').push({
+              id: Date.now().toString(),
+              type: 'deposit',
+              amount: 0,
+              description: `Bono referido (${p.name || 'Amigo'} / Bot): +${referrerReward} PTS`,
+              date: Date.now()
+            });
+            console.log(`👥 [${storeName}] Referido aplicado para ${referrerUid}: +${referrerReward} PTS`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error(`❌ [${storeName}] Error en applyWalletAndReferralRewards para #${orderData.id}:`, e.message);
+  }
+}
+// -------------------------------------------------------------------
+
 // ========================================
 // 4. FUNCIONES AUXILIARES (DESCARGA DE IMAGEN Y OCR)
 // ========================================
@@ -663,6 +747,7 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
         
         if (apiRes.status === 'completed') {
           await applyVipRewards(order, appInstance, storeName);
+          await applyWalletAndReferralRewards(order, appInstance, storeName);
         }
 
       } catch(e) {
@@ -1020,6 +1105,83 @@ const telegramLocks = new Set(); // Candado anti doble-clic en Telegram
 
 Object.keys(bots).forEach(storeName => {
   const botConfig = bots[storeName];
+  botConfig.bot.on('message', async (msg) => {
+    if (msg.text && msg.text === '/reparar_referidos') {
+      const chatId = msg.chat.id;
+      if (chatId.toString() !== botConfig.chatId.toString()) return; // Solo admin
+      
+      const db = storeApps[storeName].database();
+      botConfig.bot.sendMessage(chatId, "🔍 Iniciando escaneo de referidos atrasados...");
+
+      try {
+        const [usersSnap, ordersSnap] = await Promise.all([
+          db.ref('users').once('value'),
+          db.ref('orders').once('value')
+        ]);
+        
+        const users = usersSnap.val() || {};
+        const orders = ordersSnap.val() || {};
+        
+        const usersWithCompletedOrders = new Set();
+        for (const orderId in orders) {
+          if (orders[orderId].status === 'completed' && orders[orderId].userId) {
+            usersWithCompletedOrders.add(orders[orderId].userId);
+          }
+        }
+
+        let recompensasEntregadas = 0;
+
+        for (const uid in users) {
+          const user = users[uid];
+          if (user.referredBy && !user.hasMadeFirstPurchase && usersWithCompletedOrders.has(uid)) {
+            const refQuerySnap = await db.ref('users').orderByChild('referralCode').equalTo(user.referredBy).once('value');
+            if (refQuerySnap.exists()) {
+              const referrerUid = Object.keys(refQuerySnap.val())[0];
+              let exito = false;
+              
+              await db.ref('users/' + referrerUid).transaction(refUser => {
+                if (!refUser) return refUser;
+                const role = refUser.role || 'cliente';
+                if (!['cliente', 'influencer', 'partner'].includes(role)) return undefined;
+                
+                const maxRef = (role === 'influencer' || role === 'partner') ? (refUser.referralLimit || 100) : 10;
+                if ((refUser.referralsCount || 0) >= maxRef) return undefined;
+                
+                refUser.points = (refUser.points || 0) + 12;
+                refUser.referralsCount = (refUser.referralsCount || 0) + 1;
+                refUser.referralsEarnedPoints = (refUser.referralsEarnedPoints || 0) + 12;
+                if (role === 'influencer' && refUser.referralsCount >= 100) {
+                  refUser.role = 'partner';
+                }
+                exito = true;
+                return refUser;
+              });
+
+              if (exito) {
+                await db.ref('users/' + referrerUid + '/transactions').push({
+                  id: Date.now().toString(),
+                  type: 'deposit',
+                  amount: 0,
+                  description: `Bono referido atrasado (${user.name || user.email || 'Amigo'} / Reintegro Comando): +12 PTS`,
+                  date: Date.now()
+                });
+                await db.ref('users/' + uid).update({ hasMadeFirstPurchase: true });
+                recompensasEntregadas++;
+                botConfig.bot.sendMessage(chatId, `✅ Reintegro: +12 PTS a código ${user.referredBy} por invitar a ${user.email}`);
+              } else {
+                await db.ref('users/' + uid).update({ referredBy: null, hasMadeFirstPurchase: true });
+              }
+            }
+          }
+        }
+        
+        botConfig.bot.sendMessage(chatId, `🎉 ¡Terminado! Se entregaron ${recompensasEntregadas} bonos de referidos atrasados.`);
+      } catch (e) {
+        botConfig.bot.sendMessage(chatId, `❌ Error en reparación: ${e.message}`);
+      }
+    }
+  });
+
   botConfig.bot.on('callback_query', async (query) => {
     console.log(`[${storeName}] ➡️ Recibido callback_query:`, query.data);
 
@@ -1225,7 +1387,10 @@ Object.keys(bots).forEach(storeName => {
           } catch(e) { console.error(`[${storeName}] Error actualizando markup final:`, e.message); }
           console.log(`✅ [${storeName}] Pedido #${orderId} aprobado: ${buttonText}`);
 
-          if (newStatus === 'completed') await applyVipRewards(orderData, appInstance, storeName);
+          if (newStatus === 'completed') {
+            await applyVipRewards(orderData, appInstance, storeName);
+            await applyWalletAndReferralRewards(orderData, appInstance, storeName);
+          }
 
           if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
             const codeMsg = `🤖 <b>ENTREGA DE CÓDIGO — #${orderId}</b>\n\n${adminNote}`;
@@ -1400,6 +1565,7 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
             const appInstance = storeApps[storeName];
             if (appInstance) {
                 await applyVipRewards(orderData, appInstance, storeName);
+                await applyWalletAndReferralRewards(orderData, appInstance, storeName);
             }
         }
     } catch(e) {
