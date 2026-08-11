@@ -1519,7 +1519,7 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
     if (!orderData) return;
     
     // Evitar enviar duplicados si ya fue completado por el frontend
-    if (orderData.status === newStatus || orderData.status === 'completed' || orderData.status === 'invalid-id') {
+    if (orderData.status === 'completed' || orderData.status === 'invalid-id' || orderData.status === 'rejected') {
         console.log(`⏩ [${storeName}] Pedido #${orderId} ya estaba en ${orderData.status}. Omitiendo actualización de Telegram.`);
         return;
     }
@@ -1592,7 +1592,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
   const finalMerchantRef = rectificationCount > 0 ? `${orderId}_R${rectificationCount}` : orderId;
 
   let attempts = 0;
-  const maxAttempts = 12; // 12 * 5 = 60 seconds
+  const maxAttempts = 60; // 60 * 5 = 300 seconds (5 minutos)
   const dbRef = appInstance.database().ref('orders/' + orderId);
 
   const pollInterval = setInterval(async () => {
@@ -1625,7 +1625,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
               if (attempts >= maxAttempts) {
                 clearInterval(pollInterval);
                 activePolls.delete(orderId);
-                await updateOrderAndTelegram(dbRef, 'processing', 'La API no dio respuesta final tras 1 minuto. Requiere revisión manual.', '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
+                await updateOrderAndTelegram(dbRef, 'processing', 'La API no dio respuesta final tras 5 minutos. Requiere revisión manual.', '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
               }
             } else {
               clearInterval(pollInterval);
@@ -1655,7 +1655,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
             if (attempts >= maxAttempts) {
               clearInterval(pollInterval);
               activePolls.delete(orderId);
-              await updateOrderAndTelegram(dbRef, 'processing', 'Marcado para revisión manual tras 1 min (Error API).', '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
+              await updateOrderAndTelegram(dbRef, 'processing', 'Marcado para revisión manual tras 5 min (Error API).', '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
             }
           }
         });
