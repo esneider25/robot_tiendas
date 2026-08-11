@@ -375,20 +375,11 @@ async function performOCR(imageBuffer) {
       ocrNumbers.push(match[1]);
     }
 
-    // Si la búsqueda con palabras clave no encuentra nada, buscar el número más largo como "plan B"
-    if (ocrNumbers.length === 0) {
-      console.log('⚠️ Palabras clave no encontradas. Intentando buscar números largos por fuerza bruta...');
-      // Buscar números aislados de 5 a 25 dígitos (evita fechas como 2024)
-      const fallbackMatches = text.match(/(?<!\d)\d{5,25}(?!\d)/g);
-      if (fallbackMatches) {
-        // Filtramos números de teléfono venezolanos (11 dígitos que empiezan en 04)
-        ocrNumbers = [...new Set(fallbackMatches)]
-          .filter(num => !(num.length === 11 && num.startsWith('04')))
-          .sort((a, b) => b.length - a.length);
-      }
-    } else {
-      // Eliminar duplicados si hay varios
+    // Eliminar duplicados si hay varios
+    if (ocrNumbers.length > 0) {
       ocrNumbers = [...new Set(ocrNumbers)];
+    } else {
+      console.log('⚠️ Palabras clave no encontradas. (Fuerza bruta desactivada por seguridad)');
     }
 
     console.log('✅ OCR Terminado. Referencias encontradas:', ocrNumbers);
@@ -1106,6 +1097,64 @@ const telegramLocks = new Set(); // Candado anti doble-clic en Telegram
 Object.keys(bots).forEach(storeName => {
   const botConfig = bots[storeName];
   botConfig.bot.on('message', async (msg) => {
+    // --- LÓGICA DE RECHAZO PERSONALIZADO (ForceReply) ---
+    if (msg.reply_to_message && msg.reply_to_message.text && msg.text) {
+      const match = msg.reply_to_message.text.match(/Escribe el motivo del rechazo para el pedido #([A-Za-z0-9-]+):/);
+      if (match) {
+        const orderId = match[1];
+        const customReason = msg.text.trim();
+        const appInstance = storeApps[storeName];
+        try {
+            const dbRef = appInstance.database().ref('orders/' + orderId);
+            const snap = await dbRef.once('value');
+            const orderData = snap.val();
+
+            if (!orderData || orderData.status !== 'pending') {
+              botConfig.bot.sendMessage(msg.chat.id, `⚠️ El pedido #${orderId} ya fue procesado o no existe.`);
+              return;
+            }
+
+            const statusHistory = orderData.statusHistory || [];
+            statusHistory.push({ status: 'rejected', timestamp: new Date().toISOString(), note: customReason });
+
+            // Reembolso si pagó con monedero
+            if (orderData.paymentMethodId === 'wallet' && orderData.userId && orderData.productType !== 'wallet-recharge') {
+              try {
+                const walletRef = appInstance.database().ref('users/' + orderData.userId + '/wallet');
+                const walletSnap = await walletRef.once('value');
+                const amountToRefund = parseFloat(orderData.priceUsd || 0);
+                await walletRef.set((parseFloat(walletSnap.val() || 0)) + amountToRefund);
+                await appInstance.database().ref('users/' + orderData.userId + '/transactions').push({
+                  id: Date.now().toString(), type: 'deposit', amount: amountToRefund,
+                  description: `Pago reembolsado por pedido rechazado (#${orderData.id})`, date: Date.now()
+                });
+                console.log(`💸 Reembolso de $${amountToRefund} aplicado a ${orderData.userId}`);
+              } catch(e) { console.error('Error reembolsando monedero (custom reject):', e); }
+            }
+
+            await dbRef.update({
+              status: 'rejected', adminNote: customReason, rejectReason: customReason,
+              updatedAt: new Date().toISOString(), statusHistory
+            });
+            
+            botConfig.bot.sendMessage(msg.chat.id, `✅ Pedido #${orderId} rechazado con motivo personalizado.`);
+            
+            if (orderData.telegramMessageId) {
+                const newMarkup = {
+                    inline_keyboard: [
+                        [{ text: `❌ RECHAZADO: ${customReason.substring(0, 20)}${customReason.length > 20 ? '...' : ''}`, callback_data: 'noop' }],
+                        [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+                    ]
+                };
+                botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: msg.chat.id, message_id: orderData.telegramMessageId }).catch(()=>{});
+            }
+        } catch(e) {
+            console.error(`[${storeName}] Error procesando rechazo personalizado:`, e);
+        }
+        return;
+      }
+    }
+
     if (msg.text && msg.text === '/reparar_referidos') {
       const chatId = msg.chat.id;
       if (chatId.toString() !== botConfig.chatId.toString()) return; // Solo admin
@@ -1240,10 +1289,22 @@ Object.keys(bots).forEach(storeName => {
         const reasonCode = rest.substring(lastUnderscore + 1);
         const appInstance = storeApps[storeName];
 
+        if (reasonCode === 'custom') {
+           const forceReplyMarkup = {
+             force_reply: true,
+             input_field_placeholder: 'Escribe el motivo...'
+           };
+           try {
+             await botConfig.bot.sendMessage(chatId, `⚠️ Escribe el motivo del rechazo para el pedido #${orderId}:\n*(Responde directamente a este mensaje)*`, { reply_markup: forceReplyMarkup, parse_mode: 'Markdown' });
+           } catch(e) { console.error('Error enviando force_reply:', e); }
+           return;
+        }
+
         let rejectMsg = 'Pedido rechazado';
         if (reasonCode === 'monto') rejectMsg = '💰 Monto Incompleto';
         else if (reasonCode === 'duplicado') rejectMsg = '⚠️ Pago duplicado';
         else if (reasonCode === 'captura') rejectMsg = '🖼️ Error captura no cargó, enviar el pago nuevamente';
+        else if (reasonCode === 'noref') rejectMsg = '🔍 Referencia de pago no encontrada';
         else if (reasonCode === 'general') rejectMsg = '🚫 Pedido rechazado';
 
         try {
@@ -1333,6 +1394,8 @@ Object.keys(bots).forEach(storeName => {
               [{ text: '💰 Monto Incompleto', callback_data: `rejectreason_${orderId}_monto` }],
               [{ text: '⚠️ Pago duplicado', callback_data: `rejectreason_${orderId}_duplicado` }],
               [{ text: '🖼️ Error captura no cargó, enviar el pago nuevamente', callback_data: `rejectreason_${orderId}_captura` }],
+              [{ text: '🔍 Referencia de pago no encontrada', callback_data: `rejectreason_${orderId}_noref` }],
+              [{ text: '✏️ Rechazo Personalizado', callback_data: `rejectreason_${orderId}_custom` }],
               [{ text: '🚫 Pedido rechazado', callback_data: `rejectreason_${orderId}_general` }],
               [{ text: '🔙 Cancelar', callback_data: `cancelreject_${orderId}` }]
             ]
