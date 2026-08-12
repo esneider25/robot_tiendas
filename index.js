@@ -1339,6 +1339,19 @@ Object.keys(bots).forEach(storeName => {
               console.log(`💸 Reembolso de $${amountToRefund} aplicado a ${orderData.userId}`);
             } catch(e) { console.error('Error reembolsando monedero:', e); }
           }
+          
+          try {
+            if (orderData.userId) {
+              await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
+                title: 'Pedido Rechazado ❌',
+                body: `Tu pedido de ${orderData.productName} ha sido rechazado. Nota: ${rejectMsg}`,
+                type: 'order',
+                timestamp: new Date().toISOString(),
+                read: false
+              });
+              console.log(`🔔 Notificación de rechazo enviada al usuario ${orderData.userId}`);
+            }
+          } catch(e) { console.error('Error enviando notificación de rechazo:', e); }
 
           const newMarkup = {
             inline_keyboard: [
@@ -1453,6 +1466,19 @@ Object.keys(bots).forEach(storeName => {
           if (newStatus === 'completed') {
             await applyVipRewards(orderData, appInstance, storeName);
             await applyWalletAndReferralRewards(orderData, appInstance, storeName);
+            
+            try {
+              if (orderData.userId) {
+                await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
+                  title: orderData.productType === 'wallet-recharge' ? 'Recarga Exitosa 💵' : 'Pedido Completado ✅',
+                  body: orderData.productType === 'wallet-recharge' ? `Tu recarga de monedero por $${parseFloat(orderData.priceUsd||0).toFixed(2)} ha sido procesada con éxito.` : `Tu pedido de ${orderData.productName} ha sido procesado con éxito.${adminNote ? ` Nota: ${adminNote}` : ''}`,
+                  type: orderData.productType === 'wallet-recharge' ? 'wallet' : 'order',
+                  timestamp: new Date().toISOString(),
+                  read: false
+                });
+                console.log(`🔔 Notificación de aprobación enviada al usuario ${orderData.userId}`);
+              }
+            } catch(e) { console.error('Error enviando notificación de aprobación:', e); }
           }
 
           if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
