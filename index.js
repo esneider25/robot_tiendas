@@ -970,6 +970,58 @@ async function syncTelegramStatus(orderId, order, storeName) {
   }
 }
 
+async function processNewWithdrawal(withdrawalId, withdrawal, appInstance, storeName) {
+  if (withdrawal.botProcessed) return;
+
+  const storeConfig = bots[storeName];
+  if (!storeConfig) return;
+
+  const dbRef = appInstance.database().ref('withdrawals/' + withdrawalId);
+
+  // 1. Marcar como procesado por el bot
+  await dbRef.update({ botProcessed: true });
+
+  // 2. Construir mensaje
+  let typeStr = withdrawal.type === 'tournament' ? '🏆 RETIRO DE TORNEO' : '🎁 RETIRO DE TIENDA (PTS)';
+  let msg = `💰 <b>NUEVA SOLICITUD DE RETIRO</b>\n\n`;
+  msg += `<b>Tipo:</b> ${typeStr}\n`;
+  msg += `<b>Usuario:</b> ${withdrawal.userName || 'N/A'}\n`;
+  msg += `<b>Email:</b> ${withdrawal.userEmail || 'N/A'}\n`;
+  if (withdrawal.type !== 'tournament') {
+    msg += `<b>Monto (PTS):</b> ${withdrawal.amountPoints || 0}\n`;
+  }
+  msg += `<b>Monto (USD):</b> $${withdrawal.amountUsd || 0}\n\n`;
+  msg += `<b>Método:</b> ${withdrawal.method}\n`;
+
+  if (withdrawal.method === 'binance') {
+    msg += `<b>ID / Correo:</b> <code>${withdrawal.details?.account || ''}</code>\n`;
+  } else if (withdrawal.method === 'pagomovil') {
+    msg += `<b>Banco:</b> ${withdrawal.details?.bank || ''}\n`;
+    msg += `<b>Teléfono:</b> <code>${withdrawal.details?.phone || ''}</code>\n`;
+    msg += `<b>Cédula:</b> <code>${withdrawal.details?.cedula || ''}</code>\n`;
+  }
+
+  const inline_keyboard = [
+    [
+      { text: '✅ Aprobar', callback_data: `approve_w_${withdrawalId}` },
+      { text: '❌ Rechazar', callback_data: `reject_w_${withdrawalId}` }
+    ]
+  ];
+
+  try {
+    const sentMsg = await storeConfig.bot.sendMessage(storeConfig.chatId, msg, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard }
+    });
+    
+    // Guardar el ID del mensaje para poder actualizar los botones después
+    await dbRef.update({ telegramMessageId: sentMsg.message_id });
+    console.log(`✅ [${storeName}] Mensaje de retiro #${withdrawalId} enviado a Telegram.`);
+  } catch (err) {
+    console.error(`❌ [${storeName}] Error enviando mensaje de retiro a Telegram:`, err);
+  }
+}
+
 function startListening() {
   const stores = [
     { name: 'CandyStore', app: candyStoreApp },
@@ -978,6 +1030,16 @@ function startListening() {
   ];
 
   stores.forEach(store => {
+    if (store.name === 'AccessPlay') {
+      const wRef = store.app.database().ref('withdrawals');
+      wRef.on('child_added', (snapshot) => {
+        const wData = snapshot.val();
+        if (wData && wData.status === 'pending') {
+          processNewWithdrawal(snapshot.key, wData, store.app, store.name).catch(console.error);
+        }
+      });
+    }
+
     const ref = store.app.database().ref('orders');
     
     // Escuchar nuevos pedidos añadidos
@@ -1260,6 +1322,85 @@ Object.keys(bots).forEach(storeName => {
       // Datos desconocidos - ignorar silenciosamente
       if (!data.startsWith('approve_') && !data.startsWith('reject_') && !data.startsWith('rejectreason_') && !data.startsWith('cancelreject_')) {
         console.log(`[${storeName}] ⚠️ Callback data ignorado:`, data);
+        return;
+      }
+
+      // ── RETIROS (WITHDRAWALS) ──
+      if (data.startsWith('approve_w_') || data.startsWith('reject_w_')) {
+        const isApprove = data.startsWith('approve_w_');
+        const wId = data.replace(isApprove ? 'approve_w_' : 'reject_w_', '');
+        const appInstance = storeApps[storeName];
+
+        if (telegramLocks.has(wId)) {
+          try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⏳ Procesando retiro...' }); } catch(e){}
+          return;
+        }
+        telegramLocks.add(wId);
+
+        try {
+          const wRef = appInstance.database().ref('withdrawals/' + wId);
+          const snap = await wRef.once('value');
+          const wData = snap.val();
+
+          if (!wData || wData.status !== 'pending') {
+            try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Retiro ya procesado.', show_alert: true }); } catch(e){}
+            return;
+          }
+
+          if (isApprove) {
+            await wRef.update({ status: 'completed', processedAt: Date.now() });
+            
+            // Notificar
+            if (wData.userId) {
+              await appInstance.database().ref('users/' + wData.userId + '/notifications').push({
+                title: 'Retiro Aprobado ✅',
+                body: `Tu solicitud de retiro de $${wData.amountUsd} USD ha sido completada y enviada a tu cuenta.`,
+                type: 'withdrawal',
+                timestamp: new Date().toISOString(),
+                read: false
+              });
+            }
+          } else {
+            // Rechazado (Reembolso)
+            await wRef.update({ status: 'rejected', processedAt: Date.now() });
+            if (wData.userId) {
+              if (wData.type === 'tournament') {
+                const wTournRef = appInstance.database().ref('users/' + wData.userId + '/withdrawnTournamentEarnings');
+                const tSnap = await wTournRef.once('value');
+                await wTournRef.set(Math.max(0, (parseFloat(tSnap.val()) || 0) - (parseFloat(wData.amountUsd) || 0)));
+              } else {
+                const uPointsRef = appInstance.database().ref('users/' + wData.userId + '/points');
+                const pSnap = await uPointsRef.once('value');
+                await uPointsRef.set((parseFloat(pSnap.val()) || 0) + (parseFloat(wData.amountPoints) || 0));
+                
+                await appInstance.database().ref('users/' + wData.userId + '/transactions').push({
+                  id: Date.now().toString(), type: 'deposit', amount: 0,
+                  description: `Devolución por retiro rechazado (+${wData.amountPoints} PTS)`,
+                  date: Date.now()
+                });
+              }
+
+              await appInstance.database().ref('users/' + wData.userId + '/notifications').push({
+                title: 'Retiro Rechazado ❌',
+                body: `Tu solicitud de retiro fue rechazada. Los fondos han sido devueltos a tu saldo disponible.`,
+                type: 'withdrawal',
+                timestamp: new Date().toISOString(),
+                read: false
+              });
+            }
+          }
+
+          // Actualizar mensaje de Telegram
+          const stateText = isApprove ? '✅ APROBADO' : '❌ RECHAZADO';
+          const newMarkup = { inline_keyboard: [[{ text: stateText, callback_data: 'noop' }]] };
+          try { await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId }); } catch(e){}
+
+          try { await botConfig.bot.answerCallbackQuery(query.id, { text: `Retiro ${stateText}` }); } catch(e){}
+        } catch(e) {
+          console.error(`[${storeName}] Error procesando retiro #${wId}:`, e.message);
+        } finally {
+          telegramLocks.delete(wId);
+        }
         return;
       }
 
