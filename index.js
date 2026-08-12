@@ -1045,10 +1045,17 @@ async function processNewInscription(tournamentId, userId, pData, appInstance, s
   msg += `<b>Método:</b> ${pData.paymentMethod || 'N/A'}\n`;
   if (pData.paymentRef) msg += `<b>Ref:</b> <code>${pData.paymentRef}</code>\n`;
 
+  const actionId = Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
+  await appInstance.database().ref(`botActions/${actionId}`).set({
+    tournamentId: tournamentId,
+    userId: userId,
+    createdAt: Date.now()
+  });
+
   const inline_keyboard = [
     [
-      { text: '✅ Aprobar', callback_data: `ai_${tournamentId}_${userId}` },
-      { text: '❌ Rechazar', callback_data: `ri_${tournamentId}_${userId}` }
+      { text: '✅ Aprobar', callback_data: `ai_${actionId}` },
+      { text: '❌ Rechazar', callback_data: `ri_${actionId}` }
     ]
   ];
 
@@ -1386,12 +1393,10 @@ Object.keys(bots).forEach(storeName => {
       // ── INSCRIPCIONES PAGAS (TOURNAMENTS) ──
       if (data.startsWith('ai_') || data.startsWith('ri_')) {
         const isApprove = data.startsWith('ai_');
-        const ids = data.replace(isApprove ? 'ai_' : 'ri_', '').split('_');
-        const tId = ids[0];
-        const uId = ids[1];
+        const actionId = data.replace(isApprove ? 'ai_' : 'ri_', '');
         const appInstance = storeApps[storeName];
         
-        const lockId = `tinsc_${tId}_${uId}`;
+        const lockId = `tinsc_${actionId}`;
         if (telegramLocks.has(lockId)) {
           try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⏳ Procesando inscripción...' }); } catch(e){}
           return;
@@ -1399,6 +1404,18 @@ Object.keys(bots).forEach(storeName => {
         telegramLocks.add(lockId);
 
         try {
+          const actionRef = appInstance.database().ref(`botActions/${actionId}`);
+          const actionSnap = await actionRef.once('value');
+          const actionData = actionSnap.val();
+
+          if (!actionData) {
+            try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Acción expirada o inválida.', show_alert: true }); } catch(e){}
+            return;
+          }
+
+          const tId = actionData.tournamentId;
+          const uId = actionData.userId;
+
           const pRef = appInstance.database().ref(`tournaments/${tId}/participants/${uId}`);
           const snap = await pRef.once('value');
           const pData = snap.val();
