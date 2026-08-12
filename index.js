@@ -1022,7 +1022,7 @@ async function processNewWithdrawal(withdrawalId, withdrawal, appInstance, store
   }
 }
 
-async function processNewInscription(tournamentId, userId, pData, appInstance, storeName) {
+async function processNewInscription(tournamentId, userId, pData, tData, appInstance, storeName) {
   if (pData.botProcessed) return;
 
   const storeConfig = bots[storeName];
@@ -1033,17 +1033,40 @@ async function processNewInscription(tournamentId, userId, pData, appInstance, s
   // 1. Marcar como procesado
   await dbRef.update({ botProcessed: true });
 
-  // 2. Construir mensaje
-  let msg = `🏆 <b>NUEVA INSCRIPCIÓN PENDIENTE</b>\n\n`;
-  msg += `<b>Juego:</b> ${pData.gameName || 'N/A'}\n`;
-  msg += `<b>ID / Usuario:</b> <code>${pData.gameId || 'N/A'}</code>\n`;
-  
-  if (pData.teamMembers && pData.teamMembers.length > 0) {
-    msg += `<b>Miembros:</b> ${pData.teamMembers.length}\n`;
+  // Get exchange rate for Bs calculation
+  let bsAmountStr = '';
+  if (tData.entryFee) {
+    try {
+      const snap = await appInstance.database().ref('settings/exchangeRate/usdToBsf').once('value');
+      const rate = snap.val() || 1;
+      bsAmountStr = ` | Bs. ${(tData.entryFee * rate).toFixed(2)}`;
+    } catch (e) { }
   }
 
-  msg += `<b>Método:</b> ${pData.paymentMethod || 'N/A'}\n`;
-  if (pData.paymentRef) msg += `<b>Ref:</b> <code>${pData.paymentRef}</code>\n`;
+  // Format mode
+  const modeLabels = { solo: 'Solo', duo: 'Dúo', squad: 'Escuadra' };
+  const modeText = modeLabels[tData.gameMode] || tData.gameMode || 'Solo';
+
+  // Format Team members
+  let membersText = '';
+  if (pData.teamMembers && pData.teamMembers.length > 0) {
+    membersText = pData.teamMembers.map(tm => tm.gameName).join(', ');
+  }
+
+  // 2. Construir mensaje
+  let msg = `🏆 <b>NUEVA INSCRIPCIÓN PENDIENTE</b> (${modeText})\n\n`;
+  msg += `<b>Juego:</b> ${tData.productName || tData.title || 'N/A'}\n`;
+  msg += `👤 <b>Jugador:</b> <code>${pData.gameName || 'N/A'}</code>\n`;
+  
+  if (membersText) {
+    msg += `👤 <b>Miembros:</b> ${membersText}\n`;
+  }
+
+  const fee = tData.entryFee ? `$${tData.entryFee.toFixed(2)} USD${bsAmountStr}` : 'Gratis';
+  msg += `💰 <b>Monto:</b> ${fee}\n`;
+  msg += `🏦 <b>Método:</b> ${pData.paymentMethod || 'N/A'}\n`;
+  if (pData.paymentRef) msg += `🔢 <b>Referencia:</b> <code>${pData.paymentRef}</code>\n`;
+  msg += `📱 <b>Contacto:</b> ${pData.email || 'N/A'}\n`;
 
   const actionId = Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
   await appInstance.database().ref(`botActions/${actionId}`).set({
@@ -1096,7 +1119,7 @@ function startListening() {
           Object.keys(tData.participants).forEach(uid => {
             const p = tData.participants[uid];
             if (p.paymentStatus === 'pending_payment' && !p.botProcessed) {
-               processNewInscription(tId, uid, p, store.app, store.name).catch(console.error);
+               processNewInscription(tId, uid, p, tData, store.app, store.name).catch(console.error);
             }
           });
         }
