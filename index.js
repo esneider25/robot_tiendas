@@ -982,23 +982,29 @@ async function processNewWithdrawal(withdrawalId, withdrawal, appInstance, store
   await dbRef.update({ botProcessed: true });
 
   // 2. Construir mensaje
-  let typeStr = withdrawal.type === 'tournament' ? '🏆 RETIRO DE TORNEO' : '🎁 RETIRO DE TIENDA (PTS)';
+  let typeStr = (withdrawal.type === 'tournament' || withdrawal.type === 'tournament_prize') ? '🏆 RETIRO DE TORNEO' : '🎁 RETIRO DE TIENDA (PTS)';
   let msg = `💰 <b>NUEVA SOLICITUD DE RETIRO</b>\n\n`;
   msg += `<b>Tipo:</b> ${typeStr}\n`;
-  msg += `<b>Usuario:</b> ${withdrawal.userName || 'N/A'}\n`;
-  msg += `<b>Email:</b> ${withdrawal.userEmail || 'N/A'}\n`;
-  if (withdrawal.type !== 'tournament') {
-    msg += `<b>Monto (PTS):</b> ${withdrawal.amountPoints || 0}\n`;
+  msg += `👤 <b>Usuario:</b> <code>${withdrawal.userName || 'N/A'}</code>\n`;
+  msg += `📧 <b>Email:</b> ${withdrawal.userEmail || 'N/A'}\n\n`;
+  
+  msg += `💵 <b>MONTO A PAGAR:</b>\n`;
+  if (withdrawal.type !== 'tournament' && withdrawal.type !== 'tournament_prize') {
+    msg += `• Puntos descontados: ${withdrawal.amountPoints || 0} PTS\n`;
   }
-  msg += `<b>Monto (USD):</b> $${withdrawal.amountUsd || 0}\n\n`;
-  msg += `<b>Método:</b> ${withdrawal.method}\n`;
-
+  msg += `• A enviar: <b>$${parseFloat(withdrawal.amountUsd || 0).toFixed(2)} USD</b>\n\n`;
+  
+  msg += `🏦 <b>DATOS DE PAGO:</b>\n`;
   if (withdrawal.method === 'binance') {
-    msg += `<b>ID / Correo:</b> <code>${withdrawal.details?.account || ''}</code>\n`;
+    msg += `• Método: Binance Pay\n`;
+    msg += `• Correo / Pay ID: <code>${withdrawal.details?.account || ''}</code>\n`;
   } else if (withdrawal.method === 'pagomovil') {
-    msg += `<b>Banco:</b> ${withdrawal.details?.bank || ''}\n`;
-    msg += `<b>Teléfono:</b> <code>${withdrawal.details?.phone || ''}</code>\n`;
-    msg += `<b>Cédula:</b> <code>${withdrawal.details?.cedula || ''}</code>\n`;
+    msg += `• Método: Pago Móvil\n`;
+    msg += `• Banco: ${withdrawal.details?.bank || ''}\n`;
+    msg += `• Teléfono: <code>${withdrawal.details?.phone || ''}</code>\n`;
+    msg += `• Cédula: <code>${withdrawal.details?.cedula || ''}</code>\n`;
+  } else {
+    msg += `• Método: ${withdrawal.method}\n`;
   }
 
   const inline_keyboard = [
@@ -1523,7 +1529,7 @@ Object.keys(bots).forEach(storeName => {
             // Rechazado (Reembolso)
             await wRef.update({ status: 'rejected', processedAt: Date.now() });
             if (wData.userId) {
-              if (wData.type === 'tournament') {
+              if (wData.type === 'tournament' || wData.type === 'tournament_prize') {
                 const wTournRef = appInstance.database().ref('users/' + wData.userId + '/withdrawnTournamentEarnings');
                 const tSnap = await wTournRef.once('value');
                 await wTournRef.set(Math.max(0, (parseFloat(tSnap.val()) || 0) - (parseFloat(wData.amountUsd) || 0)));
