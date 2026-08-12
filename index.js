@@ -1648,10 +1648,13 @@ Object.keys(bots).forEach(storeName => {
           
           try {
             if (orderData.userId) {
+              const isWallet = orderData.productType === 'wallet-recharge';
               await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
-                title: 'Pedido Rechazado ❌',
-                body: `Tu pedido de ${orderData.productName} ha sido rechazado. Nota: ${rejectMsg}`,
-                type: 'order',
+                title: isWallet ? 'Recarga Rechazada ❌' : 'Pedido Rechazado ❌',
+                body: isWallet 
+                  ? `Tu solicitud de recarga de monedero por $${parseFloat(orderData.priceUsd||0).toFixed(2)} ha sido rechazada. Nota: ${rejectMsg}`
+                  : `Tu pedido de ${orderData.productName} ha sido rechazado. Nota: ${rejectMsg}`,
+                type: isWallet ? 'wallet' : 'order',
                 timestamp: new Date().toISOString(),
                 read: false
               });
@@ -1961,6 +1964,43 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
             if (appInstance) {
                 await applyVipRewards(orderData, appInstance, storeName);
                 await applyWalletAndReferralRewards(orderData, appInstance, storeName);
+            }
+        }
+
+        // --- ENVIAR NOTIFICACIÓN AL USUARIO ---
+        if (newStatus === 'completed' || newStatus === 'rejected' || newStatus === 'invalid-id' || newStatus === 'processing') {
+            const appInstance = storeApps[storeName];
+            if (appInstance && orderData.userId) {
+                const statusLabels = { processing: 'Procesando ⚙️', completed: 'Completado ✅', rejected: 'Rechazado ❌', 'invalid-id': 'ID Inválido ⚠️' };
+                const statusText = statusLabels[newStatus] || newStatus.toUpperCase();
+                
+                let title = 'Actualización de Pedido 📦';
+                let type = 'order';
+                let body = `Tu pedido de ${orderData.productName || 'producto'} ahora está: ${statusText}.`;
+                
+                if (newStatus === 'completed' && orderData.productType === 'wallet-recharge') {
+                    title = 'Recarga Exitosa 💵';
+                    body = `Tu recarga de monedero por $${parseFloat(orderData.priceUsd||0).toFixed(2)} ha sido procesada con éxito.`;
+                    type = 'wallet';
+                } else if (newStatus === 'rejected') {
+                    title = 'Pedido Rechazado ❌';
+                    body = `Tu pedido de ${orderData.productName || 'producto'} ha sido rechazado. Nota: ${adminNote || 'Sin nota'}`;
+                } else if (newStatus === 'invalid-id') {
+                    title = 'ID Inválido ⚠️';
+                    body = `El ID proporcionado para ${orderData.productName || 'tu pedido'} es inválido. Nota: ${adminNote || 'Verifica tu ID'}`;
+                } else if (newStatus === 'completed') {
+                    title = 'Pedido Completado ✅';
+                    body = `Tu pedido de ${orderData.productName || 'producto'} ha sido procesado con éxito.${adminNote ? ` Nota: ${adminNote}` : ''}`;
+                }
+
+                await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
+                    title: title,
+                    body: body,
+                    type: type,
+                    timestamp: new Date().toISOString(),
+                    read: false
+                });
+                console.log(`🔔 Notificación de ${newStatus} enviada al usuario ${orderData.userId} desde background polling`);
             }
         }
     } catch(e) {
