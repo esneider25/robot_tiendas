@@ -1022,6 +1022,48 @@ async function processNewWithdrawal(withdrawalId, withdrawal, appInstance, store
   }
 }
 
+async function processNewInscription(tournamentId, userId, pData, appInstance, storeName) {
+  if (pData.botProcessed) return;
+
+  const storeConfig = bots[storeName];
+  if (!storeConfig) return;
+
+  const dbRef = appInstance.database().ref(`tournaments/${tournamentId}/participants/${userId}`);
+
+  // 1. Marcar como procesado
+  await dbRef.update({ botProcessed: true });
+
+  // 2. Construir mensaje
+  let msg = `🏆 <b>NUEVA INSCRIPCIÓN PENDIENTE</b>\n\n`;
+  msg += `<b>Juego:</b> ${pData.gameName || 'N/A'}\n`;
+  msg += `<b>ID / Usuario:</b> <code>${pData.gameId || 'N/A'}</code>\n`;
+  
+  if (pData.teamMembers && pData.teamMembers.length > 0) {
+    msg += `<b>Miembros:</b> ${pData.teamMembers.length}\n`;
+  }
+
+  msg += `<b>Método:</b> ${pData.paymentMethod || 'N/A'}\n`;
+  if (pData.paymentRef) msg += `<b>Ref:</b> <code>${pData.paymentRef}</code>\n`;
+
+  const inline_keyboard = [
+    [
+      { text: '✅ Aprobar', callback_data: `ai_${tournamentId}_${userId}` },
+      { text: '❌ Rechazar', callback_data: `ri_${tournamentId}_${userId}` }
+    ]
+  ];
+
+  try {
+    const sentMsg = await storeConfig.bot.sendMessage(storeConfig.chatId, msg, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard }
+    });
+    
+    await dbRef.update({ telegramMessageId: sentMsg.message_id });
+  } catch (err) {
+    console.error(`❌ [${storeName}] Error enviando msj inscripción a Telegram:`, err);
+  }
+}
+
 function startListening() {
   const stores = [
     { name: 'CandyStore', app: candyStoreApp },
@@ -1038,6 +1080,22 @@ function startListening() {
           processNewWithdrawal(snapshot.key, wData, store.app, store.name).catch(console.error);
         }
       });
+
+      const tRef = store.app.database().ref('tournaments');
+      const handleTournament = (snapshot) => {
+        const tId = snapshot.key;
+        const tData = snapshot.val();
+        if (tData && tData.participants) {
+          Object.keys(tData.participants).forEach(uid => {
+            const p = tData.participants[uid];
+            if (p.paymentStatus === 'pending_payment' && !p.botProcessed) {
+               processNewInscription(tId, uid, p, store.app, store.name).catch(console.error);
+            }
+          });
+        }
+      };
+      tRef.on('child_added', handleTournament);
+      tRef.on('child_changed', handleTournament);
     }
 
     const ref = store.app.database().ref('orders');
@@ -1320,8 +1378,69 @@ Object.keys(bots).forEach(storeName => {
       if (data === 'ignore' || data === 'noop') return;
 
       // Datos desconocidos - ignorar silenciosamente
-      if (!data.startsWith('approve_') && !data.startsWith('reject_') && !data.startsWith('rejectreason_') && !data.startsWith('cancelreject_')) {
+      if (!data.startsWith('approve_') && !data.startsWith('reject_') && !data.startsWith('rejectreason_') && !data.startsWith('cancelreject_') && !data.startsWith('ai_') && !data.startsWith('ri_')) {
         console.log(`[${storeName}] ⚠️ Callback data ignorado:`, data);
+        return;
+      }
+
+      // ── INSCRIPCIONES PAGAS (TOURNAMENTS) ──
+      if (data.startsWith('ai_') || data.startsWith('ri_')) {
+        const isApprove = data.startsWith('ai_');
+        const ids = data.replace(isApprove ? 'ai_' : 'ri_', '').split('_');
+        const tId = ids[0];
+        const uId = ids[1];
+        const appInstance = storeApps[storeName];
+        
+        const lockId = `tinsc_${tId}_${uId}`;
+        if (telegramLocks.has(lockId)) {
+          try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⏳ Procesando inscripción...' }); } catch(e){}
+          return;
+        }
+        telegramLocks.add(lockId);
+
+        try {
+          const pRef = appInstance.database().ref(`tournaments/${tId}/participants/${uId}`);
+          const snap = await pRef.once('value');
+          const pData = snap.val();
+
+          if (!pData || pData.paymentStatus !== 'pending_payment') {
+            try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Inscripción ya procesada.', show_alert: true }); } catch(e){}
+            return;
+          }
+
+          if (isApprove) {
+            await pRef.update({ paymentStatus: 'approved' });
+            if (pData.uid) {
+              await appInstance.database().ref('users/' + pData.uid + '/notifications').push({
+                title: 'Inscripción Aprobada ✅',
+                body: `Tu pago ha sido verificado y tu cupo está asegurado en el torneo.`,
+                type: 'tournament',
+                timestamp: new Date().toISOString(),
+                read: false
+              });
+            }
+          } else {
+            await pRef.update({ paymentStatus: 'rejected' });
+            if (pData.uid) {
+              await appInstance.database().ref('users/' + pData.uid + '/notifications').push({
+                title: 'Inscripción Rechazada ❌',
+                body: `Hubo un problema con el pago de tu inscripción. Por favor contacta a soporte.`,
+                type: 'tournament',
+                timestamp: new Date().toISOString(),
+                read: false
+              });
+            }
+          }
+
+          const stateText = isApprove ? '✅ INSCRITO' : '❌ RECHAZADO';
+          const newMarkup = { inline_keyboard: [[{ text: stateText, callback_data: 'noop' }]] };
+          try { await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId }); } catch(e){}
+          try { await botConfig.bot.answerCallbackQuery(query.id, { text: `Inscripción ${stateText}` }); } catch(e){}
+        } catch(e) {
+          console.error(`[${storeName}] Error procesando inscripción:`, e.message);
+        } finally {
+          telegramLocks.delete(lockId);
+        }
         return;
       }
 
