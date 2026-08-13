@@ -1043,8 +1043,9 @@ async function processNewInscription(tournamentId, userId, pData, tData, appInst
   let bsAmountStr = '';
   if (tData.entryFee) {
     try {
-      const snap = await appInstance.database().ref('settings/exchangeRate/usdToBsf').once('value');
-      const rate = snap.val() || 1;
+      const snap = await appInstance.database().ref('exchange_rate').once('value');
+      const rates = snap.val() || {};
+      const rate = rates.tournamentsUsdToBs || rates.usdToBs || 1;
       bsAmountStr = ` | Bs. ${(tData.entryFee * rate).toFixed(2)}`;
     } catch (e) { }
   }
