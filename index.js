@@ -992,7 +992,11 @@ async function processNewWithdrawal(withdrawalId, withdrawal, appInstance, store
   if (withdrawal.type !== 'tournament' && withdrawal.type !== 'tournament_prize') {
     msg += `• Puntos descontados: ${withdrawal.amountPoints || 0} PTS\n`;
   }
-  msg += `• A enviar: <b>$${parseFloat(withdrawal.amountUsd || 0).toFixed(2)} USD</b>\n\n`;
+  msg += `• A enviar: <b>$${parseFloat(withdrawal.amountUsd || 0).toFixed(2)} USD</b>`;
+  if (withdrawal.amountBs) {
+    msg += ` | <b>Bs. ${parseFloat(withdrawal.amountBs).toLocaleString('es-VE', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</b>`;
+  }
+  msg += `\n\n`;
   
   msg += `🏦 <b>DATOS DE PAGO:</b>\n`;
   if (withdrawal.method === 'binance') {
