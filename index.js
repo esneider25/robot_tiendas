@@ -1064,6 +1064,25 @@ async function processNewInscription(tournamentId, userId, pData, tData, appInst
     membersText = pData.teamMembers.map(tm => tm.gameName).join(', ');
   }
 
+  // Get payment methods to map ID to Name
+  let paymentMethodName = pData.paymentMethodName || pData.paymentMethod || 'N/A';
+  if (pData.paymentMethod && pData.paymentMethod.startsWith('pm-')) {
+    try {
+      const pmSnap = await appInstance.database().ref('payment_methods').once('value');
+      const pmData = pmSnap.val() || [];
+      const pmItem = pmData.find(pm => pm && pm.id === pData.paymentMethod);
+      if (pmItem && pmItem.name) {
+        paymentMethodName = pmItem.name;
+      }
+    } catch (e) { }
+  } else if (pData.paymentMethod === 'wallet') {
+    paymentMethodName = 'Mi Billetera Virtual';
+  } else if (pData.paymentMethod === 'pagomovil') {
+    paymentMethodName = 'Pago Móvil / Transferencia';
+  } else if (pData.paymentMethod === 'none') {
+    paymentMethodName = 'Gratis';
+  }
+
   // 2. Construir mensaje
   let msg = `🏆 <b>NUEVA INSCRIPCIÓN PENDIENTE</b> (${modeText})\n\n`;
   msg += `<b>Juego:</b> ${tData.productName || tData.title || 'N/A'}\n`;
@@ -1075,7 +1094,7 @@ async function processNewInscription(tournamentId, userId, pData, tData, appInst
 
   const fee = tData.entryFee ? `$${tData.entryFee.toFixed(2)} USD${bsAmountStr}` : 'Gratis';
   msg += `💰 <b>Monto:</b> ${fee}\n`;
-  msg += `🏦 <b>Método:</b> ${pData.paymentMethod || 'N/A'}\n`;
+  msg += `🏦 <b>Método:</b> ${paymentMethodName}\n`;
   if (pData.paymentRef) msg += `🔢 <b>Referencia:</b> <code>${pData.paymentRef}</code>\n`;
   msg += `📱 <b>Contacto:</b> ${pData.email || 'N/A'}\n`;
 
