@@ -1476,7 +1476,7 @@ Object.keys(bots).forEach(storeName => {
           const tId = actionData.tournamentId;
           const uId = actionData.userId;
 
-          const pRef = appInstance.database().ref(`tournaments/${tId}/participants/${uId}`);
+          const pRef = appInstance.database().ref(`tournament_participants/${tId}/${uId}`);
           const snap = await pRef.once('value');
           const pData = snap.val();
 
