@@ -1487,6 +1487,12 @@ Object.keys(bots).forEach(storeName => {
 
           if (isApprove) {
             await pRef.update({ paymentStatus: 'approved' });
+            
+            // Increment participantsCount in tournament
+            const countAddition = 1 + (pData.teamMembers ? pData.teamMembers.length : 0);
+            await appInstance.database().ref('tournaments/' + tId + '/participantsCount').transaction(c => (c || 0) + countAddition);
+            await appInstance.database().ref('tournament_metadata/participants').transaction(c => (c || 0) + countAddition);
+            
             if (pData.uid) {
               await appInstance.database().ref('users/' + pData.uid + '/notifications').push({
                 title: 'Inscripción Aprobada ✅',
