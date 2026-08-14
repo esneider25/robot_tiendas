@@ -1038,7 +1038,7 @@ async function processNewInscription(tournamentId, userId, pData, tData, appInst
   const storeConfig = bots[storeName];
   if (!storeConfig) return;
 
-  const dbRef = appInstance.database().ref(`tournaments/${tournamentId}/participants/${userId}`);
+  const dbRef = appInstance.database().ref(`tournament_participants/${tournamentId}/${userId}`);
 
   // 1. Marcar como procesado
   await dbRef.update({ botProcessed: true });
@@ -1141,21 +1141,28 @@ function startListening() {
         }
       });
 
-      const tRef = store.app.database().ref('tournaments');
-      const handleTournament = (snapshot) => {
-        const tId = snapshot.key;
-        const tData = snapshot.val();
-        if (tData && tData.participants) {
-          Object.keys(tData.participants).forEach(uid => {
-            const p = tData.participants[uid];
-            if (p.paymentStatus === 'pending_payment' && !p.botProcessed) {
-               processNewInscription(tId, uid, p, tData, store.app, store.name).catch(console.error);
-            }
-          });
-        }
+      const tpRef = store.app.database().ref('tournament_participants');
+      
+      const handleTournamentParticipants = (tournamentSnap) => {
+        const tId = tournamentSnap.key;
+        const participants = tournamentSnap.val() || {};
+        
+        Object.keys(participants).forEach(uid => {
+          const p = participants[uid];
+          if (p.paymentStatus === 'pending_payment' && !p.botProcessed) {
+            // Fetch tournament data for context
+            store.app.database().ref('tournaments/' + tId).once('value').then(tSnap => {
+              const tData = tSnap.val();
+              if (tData) {
+                processNewInscription(tId, uid, p, tData, store.app, store.name).catch(console.error);
+              }
+            }).catch(console.error);
+          }
+        });
       };
-      tRef.on('child_added', handleTournament);
-      tRef.on('child_changed', handleTournament);
+
+      tpRef.on('child_added', handleTournamentParticipants);
+      tpRef.on('child_changed', handleTournamentParticipants);
     }
 
     const ref = store.app.database().ref('orders');
