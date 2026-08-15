@@ -569,13 +569,13 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
   }
 
   // Si pagó con monedero o saldo, o si ya fue procesado automáticamente (status no es pending), lo procesamos INMEDIATAMENTE
-  const isWallet = order.paymentMethodId === 'wallet' || (order.paymentMethodName && order.paymentMethodName.toLowerCase().includes('monedero'));
+  const isWallet = order.paymentMethodId === 'wallet' || order.paymentMethodId === 'pin-redemption' || (order.paymentMethodName && order.paymentMethodName.toLowerCase().includes('monedero'));
   const isAlreadyProcessed = order.status !== 'pending';
 
   if (isWallet || isAlreadyProcessed) {
     if (pendingOrderIds.has(orderId)) pendingOrderIds.delete(orderId);
     if (isWallet) {
-      console.log(`⚡ [${storeName}] Pedido #${orderId} pagado con Monedero. Añadiendo a la cola sin foto.`);
+      console.log(`⚡ [${storeName}] Pedido #${orderId} pagado con Monedero/PIN. Añadiendo a la cola sin foto.`);
     } else {
       console.log(`⏩ [${storeName}] Pedido #${orderId} ya estaba en estado '${order.status}'. Añadiendo a la cola sin foto.`);
     }
@@ -1163,6 +1163,39 @@ function startListening() {
 
       tpRef.on('child_added', handleTournamentParticipants);
       tpRef.on('child_changed', handleTournamentParticipants);
+
+      // Recalcular contadores automáticamente (Mantiene sincronizado 0/48)
+      tpRef.on('value', (snap) => {
+        const allParticipants = snap.val() || {};
+        store.app.database().ref('tournaments').once('value').then(tSnap => {
+          const tournaments = tSnap.val() || {};
+          const updates = {};
+          let globalCount = 0;
+          
+          Object.keys(tournaments).forEach(tId => {
+            const participants = allParticipants[tId] || {};
+            let count = 0;
+            Object.values(participants).forEach(p => {
+              if (p.paymentStatus !== 'rejected') {
+                const adds = 1 + (p.teamMembers ? p.teamMembers.length : 0);
+                count += adds;
+                if (p.paymentStatus === 'approved' || p.paymentStatus === 'free') {
+                   globalCount += adds;
+                }
+              }
+            });
+            if (tournaments[tId].participantsCount !== count) {
+              updates[`tournaments/${tId}/participantsCount`] = count;
+            }
+          });
+          
+          updates['tournament_metadata/participants'] = globalCount;
+          
+          if (Object.keys(updates).length > 0) {
+            store.app.database().ref().update(updates).catch(console.error);
+          }
+        }).catch(console.error);
+      });
     }
 
     const ref = store.app.database().ref('orders');
