@@ -1416,6 +1416,49 @@ Object.keys(bots).forEach(storeName => {
         botConfig.bot.sendMessage(chatId, `❌ Error en reparación: ${e.message}`);
       }
     }
+
+    if (msg.text && msg.text === '/reparar_gastos') {
+      const chatId = msg.chat.id;
+      if (chatId.toString() !== botConfig.chatId.toString()) return; // Solo admin
+      
+      const db = storeApps[storeName].database();
+      botConfig.bot.sendMessage(chatId, "🔍 Calculando y reparando gastos de revendedores...");
+
+      try {
+        const [ordersSnap, usersSnap] = await Promise.all([
+          db.ref('orders').once('value'),
+          db.ref('users').once('value')
+        ]);
+        
+        const orders = ordersSnap.val() || {};
+        const users = usersSnap.val() || {};
+        
+        const spentMap = {};
+        Object.values(orders).forEach(o => {
+          if ((o.status === 'completed' || o.status === 'completado') && o.productType !== 'wallet-recharge') {
+            spentMap[o.userId] = (spentMap[o.userId] || 0) + (Number(o.priceUsd) || 0);
+          }
+        });
+        
+        const updates = {};
+        let count = 0;
+        for (const uid in users) {
+          if (users[uid].role === 'revendedor' && spentMap[uid] && users[uid].totalSpent !== spentMap[uid]) {
+            updates[uid + '/totalSpent'] = spentMap[uid];
+            count++;
+          }
+        }
+        
+        if (count > 0) {
+          await db.ref('users').update(updates);
+          botConfig.bot.sendMessage(chatId, `🎉 ¡Listo! Se corrigieron los gastos de ${count} revendedores de forma segura, sin tocar puntos ni cashback de los demás clientes.`);
+        } else {
+          botConfig.bot.sendMessage(chatId, `ℹ️ Todos los revendedores ya estaban corregidos o no hay nada que actualizar.`);
+        }
+      } catch (e) {
+        botConfig.bot.sendMessage(chatId, `❌ Error en reparación de gastos: ${e.message}`);
+      }
+    }
   });
 
   botConfig.bot.on('callback_query', async (query) => {
