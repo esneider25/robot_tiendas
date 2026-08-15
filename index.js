@@ -1435,7 +1435,7 @@ Object.keys(bots).forEach(storeName => {
         
         const spentMap = {};
         Object.values(orders).forEach(o => {
-          if ((o.status === 'completed' || o.status === 'completado') && o.productType !== 'wallet-recharge') {
+          if ((o.status === 'completed' || o.status === 'completado' || o.status === 'old') && o.productType !== 'wallet-recharge') {
             spentMap[o.userId] = (spentMap[o.userId] || 0) + (Number(o.priceUsd) || 0);
           }
         });
