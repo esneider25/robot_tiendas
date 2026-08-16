@@ -741,6 +741,42 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
           await applyWalletAndReferralRewards(order, appInstance, storeName);
         }
 
+        // --- ENVIAR NOTIFICACIÓN AL USUARIO TRAS AUTO-DISPATCH ---
+        if (apiRes.status === 'completed' || apiRes.status === 'rejected' || apiRes.status === 'invalid-id' || apiRes.status === 'processing') {
+            if (appInstance && order.userId) {
+                const statusLabels = { processing: 'Procesando ⚙️', completed: 'Completado ✅', rejected: 'Rechazado ❌', 'invalid-id': 'ID Inválido ⚠️' };
+                const statusText = statusLabels[apiRes.status] || apiRes.status.toUpperCase();
+                
+                let title = 'Actualización de Pedido 📦';
+                let type = 'order';
+                let body = `Tu pedido de ${order.productName || 'producto'} ahora está: ${statusText}.`;
+                
+                if (apiRes.status === 'completed' && order.productType === 'wallet-recharge') {
+                    title = 'Recarga Exitosa 💵';
+                    body = `Tu recarga de monedero por $${parseFloat(order.priceUsd||0).toFixed(2)} ha sido procesada con éxito.`;
+                    type = 'wallet';
+                } else if (apiRes.status === 'rejected') {
+                    title = 'Pedido Rechazado ❌';
+                    body = `Tu pedido de ${order.productName || 'producto'} ha sido rechazado. Nota: ${apiRes.dbNote || 'Sin nota'}`;
+                } else if (apiRes.status === 'invalid-id') {
+                    title = 'ID Inválido ⚠️';
+                    body = `El ID proporcionado para ${order.productName || 'tu pedido'} es inválido. Nota: ${apiRes.dbNote || 'Verifica tu ID'}`;
+                } else if (apiRes.status === 'completed') {
+                    title = 'Pedido Completado ✅';
+                    body = `Tu pedido de ${order.productName || 'producto'} ha sido procesado con éxito.${apiRes.dbNote ? ` Nota: ${apiRes.dbNote}` : ''}`;
+                }
+
+                await appInstance.database().ref('users/' + order.userId + '/notifications').push({
+                    title: title,
+                    body: body,
+                    type: type,
+                    timestamp: new Date().toISOString(),
+                    read: false
+                }).catch(e => console.error('Error enviando notificación en auto-dispatch:', e));
+                console.log(`🔔 Notificación de ${apiRes.status} enviada al usuario ${order.userId} desde auto-dispatch`);
+            }
+        }
+
       } catch(e) {
         console.error('Error auto-disparando API para monedero:', e);
       }
