@@ -143,8 +143,8 @@ function getVipLevel(spent) {
  */
 async function applyVipRewards(orderData, appInstance, storeName) {
   try {
-    // Solo aplicar a compras de productos (no recargas de monedero)
-    if (!orderData.userId || orderData.productType === 'wallet-recharge') return;
+    // Solo aplicar a compras de productos (no recargas de monedero ni canjes de PIN)
+    if (!orderData.userId || orderData.productType === 'wallet-recharge' || orderData.paymentMethodId === 'pin-redemption') return;
 
     const price = parseFloat(orderData.priceUsd || 0);
     if (price <= 0) return;
@@ -213,7 +213,8 @@ async function applyVipRewards(orderData, appInstance, storeName) {
 // --- NUEVA LÓGICA AGREGADA PARA REFERIDOS Y RECARGAS DE MONEDERO ---
 async function applyWalletAndReferralRewards(orderData, appInstance, storeName) {
   try {
-    if (!orderData.userId) return;
+    // Los canjes de PIN son premios/regalos, no aplican para monedero ni referidos
+    if (!orderData.userId || orderData.paymentMethodId === 'pin-redemption') return;
     const db = appInstance.database();
     const price = parseFloat(orderData.priceUsd || 0);
 
