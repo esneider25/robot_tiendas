@@ -712,7 +712,7 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
 
   // AUTO-API PARA PAGOS CON MONEDERO (Si la API está encendida)
   const appInstance = storeApps[storeName];
-  if (order.paymentMethodId === 'wallet' && order.status === 'pending') {
+  if ((order.paymentMethodId === 'wallet' || order.paymentMethodId === 'pin-redemption') && order.status === 'pending') {
     const apiConfigsSnap = await appInstance.database().ref('api_configs').once('value');
     const apiConfigs = apiConfigsSnap.val() || [];
     const apiIdx = parseInt(order.apiProvider);
