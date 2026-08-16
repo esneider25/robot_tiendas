@@ -1908,7 +1908,39 @@ Object.keys(bots).forEach(storeName => {
             await botConfig.bot.sendMessage(chatId, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
           }
 
+          if (newStatus === 'rejected') {
+            try {
+              if (orderData.userId) {
+                await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
+                  title: 'Pedido Rechazado ❌',
+                  body: `Tu pedido de ${orderData.productName || 'producto'} ha sido rechazado. Nota: ${adminNote || 'Rechazado por API'}`,
+                  type: 'order',
+                  timestamp: new Date().toISOString(),
+                  read: false
+                });
+                console.log(`🔔 Notificación de RECHAZO (API) enviada al usuario ${orderData.userId}`);
+              }
+            } catch (e) {
+              console.error('Error enviando notificación de rechazo (API):', e);
+            }
+          }
+
           if (newStatus === 'processing') {
+            try {
+              if (orderData.userId) {
+                await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
+                  title: 'Pedido en Proceso ⚙️',
+                  body: `Tu pedido de ${orderData.productName || 'producto'} ahora está: PROCESANDO ⚙️.`,
+                  type: 'order',
+                  timestamp: new Date().toISOString(),
+                  read: false
+                });
+                console.log(`🔔 Notificación de PROCESANDO enviada al usuario ${orderData.userId}`);
+              }
+            } catch (e) {
+              console.error('Error enviando notificación de proceso:', e);
+            }
+
             pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId);
           }
         }
