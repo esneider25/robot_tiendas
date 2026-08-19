@@ -1648,7 +1648,7 @@ Object.keys(bots).forEach(storeName => {
           const snap = await pRef.once('value');
           const pData = snap.val();
 
-          if (!pData || pData.paymentStatus !== 'pending') {
+          if (!pData || (pData.paymentStatus !== 'pending' && pData.paymentStatus !== 'pending_payment')) {
             try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Inscripción ya procesada.', show_alert: true }); } catch(e){}
             return;
           }
