@@ -1649,9 +1649,18 @@ Object.keys(bots).forEach(storeName => {
           const pData = snap.val();
 
           console.log(`[${storeName}] Tournament data for ${tId}/${uId}:`, pData);
-          if (!pData || (pData.paymentStatus !== 'pending' && pData.paymentStatus !== 'pending_payment')) {
-            console.log(`[${storeName}] ⚠️ Ignoring because pData missing or wrong status. pData:`, pData);
-            try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Inscripción ya procesada.', show_alert: true }); } catch(e){}
+          if (!pData) {
+            try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Inscripción no encontrada.', show_alert: true }); } catch(e){}
+            return;
+          }
+
+          if (pData.paymentStatus !== 'pending' && pData.paymentStatus !== 'pending_payment') {
+            console.log(`[${storeName}] ⚠️ pData is already processed. Status:`, pData.paymentStatus);
+            // Update the button to reflect the current state if it was already processed externally
+            const stateText = (pData.paymentStatus === 'approved' || pData.paymentStatus === 'free') ? '✅ INSCRITO' : '❌ RECHAZADO';
+            const newMarkup = { inline_keyboard: [[{ text: stateText, callback_data: 'noop' }]] };
+            try { await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId }); } catch(e){}
+            try { await botConfig.bot.answerCallbackQuery(query.id, { text: `Inscripción ya estaba procesada.` }); } catch(e){}
             return;
           }
 
