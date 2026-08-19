@@ -1648,7 +1648,9 @@ Object.keys(bots).forEach(storeName => {
           const snap = await pRef.once('value');
           const pData = snap.val();
 
+          console.log(`[${storeName}] Tournament data for ${tId}/${uId}:`, pData);
           if (!pData || (pData.paymentStatus !== 'pending' && pData.paymentStatus !== 'pending_payment')) {
+            console.log(`[${storeName}] ⚠️ Ignoring because pData missing or wrong status. pData:`, pData);
             try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Inscripción ya procesada.', show_alert: true }); } catch(e){}
             return;
           }
