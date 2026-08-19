@@ -205,6 +205,23 @@ async function applyVipRewards(orderData, appInstance, storeName) {
     }
 
     console.log(`🎯 [${storeName}] VIP aplicado a ${orderData.userId}: +${earnedPoints} PTS, totalSpent=$${newSpent.toFixed(2)}${cashbackAmount > 0 ? `, cashback=$${cashbackAmount.toFixed(4)}` : ''}`);
+
+    // 5. Lógica de Comisión para Influencers
+    if (orderData.discountCode) {
+      const discountsSnap = await appInstance.database().ref('discounts').once('value');
+      const discounts = discountsSnap.val();
+      if (discounts) {
+        const discountObj = Object.values(discounts).find(d => d.code === orderData.discountCode);
+        if (discountObj && discountObj.influencerUid && discountObj.commissionRate > 0) {
+          const commissionUsd = price * (discountObj.commissionRate / 100);
+          const commissionPoints = Math.floor(commissionUsd * 100);
+          if (commissionPoints > 0) {
+             await appInstance.database().ref('users/' + discountObj.influencerUid + '/points').transaction(current => (current || 0) + commissionPoints);
+             console.log(`🌟 [${storeName}] Influencer ${discountObj.influencerUid} recibió ${commissionPoints} PTS por comisión del cupón ${orderData.discountCode}`);
+          }
+        }
+      }
+    }
   } catch (e) {
     console.error(`❌ [${storeName}] Error aplicando VIP rewards para #${orderData.id}:`, e.message);
   }
@@ -1120,6 +1137,39 @@ async function processNewInscription(tournamentId, userId, pData, tData, appInst
     paymentMethodName = 'Gratis';
   }
 
+  // Check for duplicate references
+  let duplicateOrders = [];
+  if (pData.paymentRef) {
+    const refToCheck = String(pData.paymentRef).trim();
+    if (refToCheck) {
+      try {
+        // Check recent store orders
+        const snap = await appInstance.database().ref('orders').orderByChild('createdAt').limitToLast(250).once('value');
+        const allOrders = snap.val() || {};
+        for (const [key, oldOrder] of Object.entries(allOrders)) {
+          if (oldOrder.status !== 'rejected') {
+            if (oldOrder.ocrNumbers && oldOrder.ocrNumbers.includes(refToCheck)) {
+              if (!duplicateOrders.includes(`Pedido #${key}`)) duplicateOrders.push(`Pedido #${key}`);
+            } else if (String(oldOrder.manualRef).trim() === refToCheck || String(oldOrder.paymentRef).trim() === refToCheck) {
+              if (!duplicateOrders.includes(`Pedido #${key}`)) duplicateOrders.push(`Pedido #${key}`);
+            }
+          }
+        }
+      } catch(e) {}
+
+      try {
+        // Check participants in the same tournament
+        const snap = await appInstance.database().ref(`tournament_participants/${tournamentId}`).once('value');
+        const participants = snap.val() || {};
+        for (const [uId, part] of Object.entries(participants)) {
+          if (uId !== userId && part.paymentStatus !== 'rejected' && String(part.paymentRef).trim() === refToCheck) {
+            duplicateOrders.push(`Inscripción de ${part.gameName || uId}`);
+          }
+        }
+      } catch(e) {}
+    }
+  }
+
   // 2. Construir mensaje
   let msg = `🏆 <b>NUEVA INSCRIPCIÓN PENDIENTE</b> (${modeText})\n\n`;
   msg += `<b>Juego:</b> ${tData.productName || tData.title || 'N/A'}\n`;
@@ -1133,6 +1183,11 @@ async function processNewInscription(tournamentId, userId, pData, tData, appInst
   msg += `💰 <b>Monto:</b> ${fee}\n`;
   msg += `🏦 <b>Método:</b> ${paymentMethodName}\n`;
   if (pData.paymentRef) msg += `🔢 <b>Referencia:</b> <code>${pData.paymentRef}</code>\n`;
+
+  if (duplicateOrders.length > 0) {
+    msg += `🚨 <b>¡ALERTA DE FRAUDE!</b> Esta referencia ya fue usada en: <b>${duplicateOrders.join(', ')}</b>\n`;
+  }
+
   msg += `📱 <b>Contacto:</b> ${pData.email || 'N/A'}\n`;
 
   const actionId = Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
@@ -1593,7 +1648,7 @@ Object.keys(bots).forEach(storeName => {
           const snap = await pRef.once('value');
           const pData = snap.val();
 
-          if (!pData || pData.paymentStatus !== 'pending_payment') {
+          if (!pData || pData.paymentStatus !== 'pending') {
             try { await botConfig.bot.answerCallbackQuery(query.id, { text: '⚠️ Inscripción ya procesada.', show_alert: true }); } catch(e){}
             return;
           }
@@ -1633,7 +1688,7 @@ Object.keys(bots).forEach(storeName => {
           try { await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId }); } catch(e){}
           try { await botConfig.bot.answerCallbackQuery(query.id, { text: `Inscripción ${stateText}` }); } catch(e){}
         } catch(e) {
-          console.error(`[${storeName}] Error procesando inscripción:`, e.message);
+          console.error(`[${storeName}] Error procesando inscripción:`, e);
         } finally {
           telegramLocks.delete(lockId);
         }
