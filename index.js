@@ -1114,8 +1114,8 @@ async function processNewInscription(tournamentId, userId, pData, tData, appInst
 
   // Format Team members
   let membersText = '';
-  if (pData.teamMembers && pData.teamMembers.length > 0) {
-    membersText = pData.teamMembers.map(tm => tm.gameName).join(', ');
+  if (pData.teamMembers && Object.keys(pData.teamMembers).length > 0) {
+    membersText = Object.values(pData.teamMembers).map(tm => tm.gameName).join(', ');
   }
 
   // Get payment methods to map ID to Name
@@ -1270,7 +1270,7 @@ function startListening() {
             Object.values(participants).forEach(p => {
               // Excluimos fantasmas/rechazados
               if (p.paymentStatus === 'approved' || p.paymentStatus === 'free') {
-                const extraMembers = p.teamMembers ? p.teamMembers.filter(tm => tm.gameId !== p.gameId).length : 0;
+                const extraMembers = p.teamMembers ? Object.values(p.teamMembers).filter(tm => tm.gameId !== p.gameId).length : 0;
                 const adds = 1 + extraMembers;
                 count += adds;
                 globalCount += adds;
@@ -1633,7 +1633,7 @@ Object.keys(bots).forEach(storeName => {
             Object.values(inscripciones).forEach(p => {
                 if (p.paymentStatus === 'approved' || p.paymentStatus === 'free') {
                     // Contamos al líder + los miembros de su equipo (evitando doble conteo del líder si está en el array)
-                    const extraMembers = p.teamMembers ? p.teamMembers.filter(tm => tm.gameId !== p.gameId).length : 0;
+                    const extraMembers = p.teamMembers ? Object.values(p.teamMembers).filter(tm => tm.gameId !== p.gameId).length : 0;
                     realCount += 1 + extraMembers;
                     globalParticipants += 1 + extraMembers;
                 }
@@ -1762,7 +1762,7 @@ Object.keys(bots).forEach(storeName => {
             await pRef.update({ paymentStatus: 'approved' });
             
             // Increment participantsCount in tournament
-            const extraMembers = pData.teamMembers ? pData.teamMembers.filter(tm => tm.gameId !== pData.gameId).length : 0;
+            const extraMembers = pData.teamMembers ? Object.values(pData.teamMembers).filter(tm => tm.gameId !== pData.gameId).length : 0;
             const countAddition = 1 + extraMembers;
             await appInstance.database().ref('tournaments/' + tId + '/participantsCount').transaction(c => (c || 0) + countAddition);
             await appInstance.database().ref('tournament_metadata/participants').transaction(c => (c || 0) + countAddition);
