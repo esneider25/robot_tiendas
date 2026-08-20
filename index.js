@@ -1268,12 +1268,12 @@ function startListening() {
             const participants = allParticipants[tId] || {};
             let count = 0;
             Object.values(participants).forEach(p => {
-              if (p.paymentStatus !== 'rejected') {
-                const adds = 1 + (p.teamMembers ? p.teamMembers.length : 0);
+              // Excluimos fantasmas/rechazados
+              if (p.paymentStatus === 'approved' || p.paymentStatus === 'free') {
+                const extraMembers = p.teamMembers ? p.teamMembers.filter(tm => tm.gameId !== p.gameId).length : 0;
+                const adds = 1 + extraMembers;
                 count += adds;
-                if (p.paymentStatus === 'approved' || p.paymentStatus === 'free') {
-                   globalCount += adds;
-                }
+                globalCount += adds;
               }
             });
             if (tournaments[tId].participantsCount !== count) {
@@ -1762,7 +1762,8 @@ Object.keys(bots).forEach(storeName => {
             await pRef.update({ paymentStatus: 'approved' });
             
             // Increment participantsCount in tournament
-            const countAddition = 1 + (pData.teamMembers ? pData.teamMembers.length : 0);
+            const extraMembers = pData.teamMembers ? pData.teamMembers.filter(tm => tm.gameId !== pData.gameId).length : 0;
+            const countAddition = 1 + extraMembers;
             await appInstance.database().ref('tournaments/' + tId + '/participantsCount').transaction(c => (c || 0) + countAddition);
             await appInstance.database().ref('tournament_metadata/participants').transaction(c => (c || 0) + countAddition);
             
