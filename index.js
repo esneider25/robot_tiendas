@@ -1584,6 +1584,88 @@ Object.keys(bots).forEach(storeName => {
         botConfig.bot.sendMessage(chatId, `❌ Error en reparación de gastos: ${e.message}`);
       }
     }
+
+    if (msg.text && (msg.text === '/reparar_torneos' || msg.text === 'reparar_torneos')) {
+      const chatId = msg.chat.id;
+      if (chatId.toString() !== botConfig.chatId.toString()) return; // Solo admin
+      
+      // Asegurarse de que solo aplique para AccessPlay
+      if (storeName !== 'AccessPlay') return;
+      
+      const db = storeApps[storeName].database();
+      botConfig.bot.sendMessage(chatId, "🛠️ Iniciando el Bot de Limpieza de Bugs de Torneos...");
+
+      try {
+        // 1. Obtener todos los torneos
+        const torneosSnap = await db.ref('tournaments').once('value');
+        const torneos = torneosSnap.val() || {};
+        
+        // 2. Obtener inscripciones reales
+        const participantesSnap = await db.ref('tournament_participants').once('value');
+        const participantes = participantesSnap.val() || {};
+        
+        let completedCount = 0;
+        let updates = {};
+        let logs = [];
+        let erroresEncontrados = 0;
+        
+        for (const tId in torneos) {
+            const t = torneos[tId];
+            
+            // Contar torneos completados para las estadisticas globales
+            if (t.status === 'completed' || t.status === 'finished') {
+                completedCount++;
+            }
+            
+            // "Que no toque los torneos que estan en curso (jugándose)"
+            if (t.status === 'in_progress') {
+                continue;
+            }
+            
+            // Contar inscripciones reales evitando "fantasmas" (rechazados) y contando miembros de equipo
+            const inscripciones = participantes[tId] || {};
+            let realCount = 0;
+            
+            Object.values(inscripciones).forEach(p => {
+                if (p.paymentStatus === 'approved' || p.paymentStatus === 'free') {
+                    // Contamos al líder + los miembros de su equipo
+                    realCount += 1 + (p.teamMembers ? p.teamMembers.length : 0);
+                }
+            });
+            
+            const currentCount = t.participantsCount || 0;
+            
+            if (realCount !== currentCount) {
+                logs.push(`- Torneo ${t.name || tId}: decía ${currentCount} -> ahora ${realCount}`);
+                updates[`tournaments/${tId}/participantsCount`] = realCount;
+                erroresEncontrados++;
+            }
+        }
+        
+        // Actualizar estadísticas globales (Copas Realizadas)
+        const statsSnap = await db.ref('tournament_global_stats/completedTournaments').once('value');
+        const currentCompleted = statsSnap.val() || 0;
+        
+        if (currentCompleted !== completedCount) {
+            logs.push(`- Copas Realizadas: decía ${currentCompleted} -> ahora ${completedCount}`);
+            updates[`tournament_global_stats/completedTournaments`] = completedCount;
+            erroresEncontrados++;
+        }
+        
+        // Aplicar actualizaciones masivas a Firebase
+        if (Object.keys(updates).length > 0) {
+            await db.ref().update(updates);
+            
+            let finalMsg = `✅ ¡Limpieza de Bugs Exitosa!\n\nSe corrigieron ${erroresEncontrados} errores de sincronización:\n`;
+            finalMsg += logs.join('\n');
+            botConfig.bot.sendMessage(chatId, finalMsg);
+        } else {
+            botConfig.bot.sendMessage(chatId, `✅ Todo estaba sincronizado perfectamente. No había bugs de conteo.`);
+        }
+      } catch (e) {
+        botConfig.bot.sendMessage(chatId, `❌ Error crítico en el bot: ${e.message}`);
+      }
+    }
   });
 
   botConfig.bot.on('callback_query', async (query) => {
