@@ -1605,6 +1605,8 @@ Object.keys(bots).forEach(storeName => {
         const participantes = participantesSnap.val() || {};
         
         let completedCount = 0;
+        let activeCount = 0;
+        let globalParticipants = 0;
         let updates = {};
         let logs = [];
         let erroresEncontrados = 0;
@@ -1612,13 +1614,15 @@ Object.keys(bots).forEach(storeName => {
         for (const tId in torneos) {
             const t = torneos[tId];
             
-            // Contar torneos completados para las estadisticas globales
-            if (t.status === 'completed' || t.status === 'finished') {
+            // Contar torneos para las estadísticas globales
+            if (t.status === 'completed' || t.status === 'completado') {
                 completedCount++;
+            } else if (t.status === 'registration_open' || t.status === 'ongoing' || t.status === 'in_progress' || t.status === 'upcoming' || t.status === 'active') {
+                activeCount++;
             }
             
             // "Que no toque los torneos que estan en curso (jugándose)"
-            if (t.status === 'in_progress') {
+            if (t.status === 'in_progress' || t.status === 'ongoing') {
                 continue;
             }
             
@@ -1628,27 +1632,35 @@ Object.keys(bots).forEach(storeName => {
             
             Object.values(inscripciones).forEach(p => {
                 if (p.paymentStatus === 'approved' || p.paymentStatus === 'free') {
-                    // Contamos al líder + los miembros de su equipo
-                    realCount += 1 + (p.teamMembers ? p.teamMembers.length : 0);
+                    // Contamos al líder + los miembros de su equipo (evitando doble conteo del líder si está en el array)
+                    const extraMembers = p.teamMembers ? p.teamMembers.filter(tm => tm.gameId !== p.gameId).length : 0;
+                    realCount += 1 + extraMembers;
+                    globalParticipants += 1 + extraMembers;
                 }
             });
             
             const currentCount = t.participantsCount || 0;
             
             if (realCount !== currentCount) {
-                logs.push(`- Torneo ${t.name || tId}: decía ${currentCount} -> ahora ${realCount}`);
+                logs.push(`- Torneo ${t.name || t.title || tId}: decía ${currentCount} -> ahora ${realCount}`);
                 updates[`tournaments/${tId}/participantsCount`] = realCount;
                 erroresEncontrados++;
             }
         }
         
-        // Actualizar estadísticas globales (Copas Realizadas)
-        const statsSnap = await db.ref('tournament_global_stats/completedTournaments').once('value');
-        const currentCompleted = statsSnap.val() || 0;
+        // Actualizar estadísticas globales correctas
+        const metaSnap = await db.ref('tournament_metadata').once('value');
+        const meta = metaSnap.val() || {};
         
-        if (currentCompleted !== completedCount) {
-            logs.push(`- Copas Realizadas: decía ${currentCompleted} -> ahora ${completedCount}`);
-            updates[`tournament_global_stats/completedTournaments`] = completedCount;
+        if ((meta.completed || 0) !== completedCount) {
+            logs.push(`- Torneos Finalizados: decía ${meta.completed || 0} -> ahora ${completedCount}`);
+            updates[`tournament_metadata/completed`] = completedCount;
+            erroresEncontrados++;
+        }
+        
+        if ((meta.active || 0) !== activeCount) {
+            logs.push(`- Torneos Activos: decía ${meta.active || 0} -> ahora ${activeCount}`);
+            updates[`tournament_metadata/active`] = activeCount;
             erroresEncontrados++;
         }
         
