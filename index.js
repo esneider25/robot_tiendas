@@ -1092,10 +1092,18 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
     ];
   } else {
     if (order.paymentMethodId === 'wallet') {
-      inline_keyboard = [
-         [{ text: '⏳ Auto-Procesando...', callback_data: 'ignore' }],
-         [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
-      ];
+      const hasApi = order.apiProvider !== undefined && order.apiProvider !== null && order.apiProvider !== '';
+      if (hasApi) {
+        inline_keyboard = [
+           [{ text: '⏳ Auto-Procesando...', callback_data: 'ignore' }],
+           [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+        ];
+      } else {
+        inline_keyboard = [
+           [{ text: '👆 ENTREGAR Y APROBAR (Monedero)', callback_data: `approve_${order.id}` }],
+           [{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]
+        ];
+      }
     } else {
       inline_keyboard = [
          [
@@ -2880,14 +2888,9 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
             currentMsgId = snap.val();
         }
 
-        if (chatId && currentMsgId) {
-            await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: currentMsgId });
+        if (botConfig.chatId && currentMsgId) {
+            await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: botConfig.chatId, message_id: currentMsgId });
             console.log(`✅ [${storeName}] Pedido #${orderId} actualizado tras polling: ${buttonText}`);
-        } else {
-            // Solo si de verdad no hay mensaje en Telegram (rarísimo) manda texto suelto
-            const botMsg = `🤖 <b>RECUPERACIÓN AUTOMÁTICA — #${orderId}</b>\n\nEl servidor rescató este pedido que estaba "Procesando" y ha finalizado.\n\nResultado: <b>${buttonText}</b>`;
-            await botConfig.bot.sendMessage(botConfig.chatId, botMsg, { parse_mode: 'HTML', reply_markup: JSON.stringify(newMarkup) });
-            console.log(`✅ [${storeName}] Pedido #${orderId} recuperado por el backend: ${buttonText}`);
         }
 
         if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
