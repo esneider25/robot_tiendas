@@ -891,20 +891,18 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
               if (vaultEntry.amountBs < minAcceptable) {
                 // Pago insuficiente -> Rechazar
                 console.log(`⚠️ [AccessPlay] Monto insuficiente: Banco=Bs.${vaultEntry.amountBs} vs Mínimo=Bs.${minAcceptable.toFixed(2)}. Auto-rechazando.`);
+                order.status = 'rejected';
                 await dbRef.update({ 
                   status: 'rejected', 
                   adminNote: `Rechazado auto: Pago insuficiente (Recibido Bs.${vaultEntry.amountBs}, Esperado Bs.${expectedBs})` 
                 });
                 
-                const storeConfig = bots[storeName];
-                const rejectMsg = `❌ <b>PEDIDO RECHAZADO AUTO</b>\n\nEl pedido <b>#${order.id}</b> fue rechazado automáticamente.\nMotivo: <i>Monto insuficiente (Recibido Bs. ${vaultEntry.amountBs.toFixed(2)}, Esperado Bs. ${expectedBs.toFixed(2)})</i>.`;
-                await storeConfig.bot.sendMessage(storeConfig.chatId, rejectMsg, { parse_mode: 'HTML' }).catch(console.error);
-                
-                return; // Salir, ya procesado
+                break; // Romper el loop, pero NO hacer return para que mande el capture abajo
               } else {
                 // Monto correcto -> Aprobar
+                order.status = 'completed';
                 await autoApproveOrder(order.id, 'AccessPlay', bankInfo);
-                return; // Salir, ya procesado
+                break; // Romper el loop, pero NO hacer return para que mande el capture abajo
               }
             }
           }
@@ -1128,22 +1126,22 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
     console.error(`❌ [${storeName}] Error enviando a Telegram:`, error.message);
   }
 
-  // ── Recordatorio a los 2 minutos para pedidos que quedan PENDIENTES ──
+  // ── Recordatorio a los 5 minutos para pedidos que quedan PENDIENTES ──
   if (order.status === 'pending' && order.paymentMethodId !== 'wallet' && dbRef) {
     setTimeout(async () => {
       try {
         const snap = await dbRef.once('value');
         const checkOrder = snap.val();
-        // Si después de 2 minutos SIGUE pendiente (no lo han aprobado ni manual ni automáticamente por banco)
+        // Si después de 5 minutos SIGUE pendiente (no lo han aprobado ni manual ni automáticamente por banco)
         if (checkOrder && checkOrder.status === 'pending') {
           const reminderMsg = `⏰ <b>RECORDATORIO</b>: El pedido <b>#${order.id}</b> sigue PENDIENTE de aprobación.\n\n` +
-            `<i>Han pasado 2 minutos y no se ha encontrado el pago bancario automático. Procede a la aprobación o rechazo manual.</i>`;
+            `<i>Han pasado 5 minutos y no se ha encontrado el pago bancario automático. Procede a la aprobación o rechazo manual.</i>`;
           await storeConfig.bot.sendMessage(storeConfig.chatId, reminderMsg, { parse_mode: 'HTML' }).catch(console.error);
         }
       } catch(e) {
-        console.error(`Error en recordatorio de 2 min para pedido #${order.id}:`, e);
+        console.error(`Error en recordatorio de 5 min para pedido #${order.id}:`, e);
       }
-    }, 2 * 60 * 1000); // 2 minutos
+    }, 5 * 60 * 1000); // 5 minutos
   }
 }
 
@@ -1298,18 +1296,7 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
     pollApiStatus(orderId, orderData, appInstance, storeName, botConfig.chatId, orderData.telegramMessageId || null);
   }
 
-  // ── Mensaje de confirmación al admin en Telegram ──
-  const typeLabel = bankInfo.type === 'pagomovil' ? 'Pago Móvil' : bankInfo.type === 'transferencia_bdv' ? 'Transferencia BDV' : 'Transferencia Otros Bancos';
-  const confirmMsg = `🤖🏦 <b>PEDIDO AUTO-APROBADO — #${orderId}</b>\n\n` +
-    `✅ Estado: <b>${newStatus.toUpperCase()}</b>\n` +
-    `🔢 Ref Banco: <code>${bankInfo.ref}</code>\n` +
-    `💰 Monto Banco: Bs. ${bankInfo.amountBs.toFixed(2)}\n` +
-    `🏦 Tipo: ${typeLabel}\n` +
-    (bankInfo.name ? `👤 Pagador: ${bankInfo.name}\n` : '') +
-    (bankInfo.phone ? `📱 Tel: ${bankInfo.phone}\n` : '') +
-    `📝 Nota: ${adminNote}`;
-
-  await botConfig.bot.sendMessage(botConfig.chatId, confirmMsg, { parse_mode: 'HTML' }).catch(console.error);
+  // (El mensaje de confirmación en texto fue eliminado para no spamear al admin con mensajes extra. El admin verá la tarjeta principal con el botón actualizado)
 
   console.log(`✅ [${storeName}] Pedido #${orderId} AUTO-APROBADO por banco. Status: ${newStatus}`);
   return true;
@@ -2810,10 +2797,17 @@ async function updateOrderAndTelegram(dbRef, newStatus, adminNote, buttonText, b
         ]
     };
     try {
-        if (chatId && messageId) {
-            await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: messageId });
+        let currentMsgId = messageId;
+        if (!currentMsgId) {
+            const snap = await dbRef.child('telegramMessageId').once('value');
+            currentMsgId = snap.val();
+        }
+
+        if (chatId && currentMsgId) {
+            await botConfig.bot.editMessageReplyMarkup(newMarkup, { chat_id: chatId, message_id: currentMsgId });
             console.log(`✅ [${storeName}] Pedido #${orderId} actualizado tras polling: ${buttonText}`);
         } else {
+            // Solo si de verdad no hay mensaje en Telegram (rarísimo) manda texto suelto
             const botMsg = `🤖 <b>RECUPERACIÓN AUTOMÁTICA — #${orderId}</b>\n\nEl servidor rescató este pedido que estaba "Procesando" y ha finalizado.\n\nResultado: <b>${buttonText}</b>`;
             await botConfig.bot.sendMessage(botConfig.chatId, botMsg, { parse_mode: 'HTML', reply_markup: JSON.stringify(newMarkup) });
             console.log(`✅ [${storeName}] Pedido #${orderId} recuperado por el backend: ${buttonText}`);
