@@ -409,6 +409,93 @@ async function performOCR(imageBuffer) {
 }
 
 // ========================================
+// 4.3 PARSEO DE NOTIFICACIONES BANCARIAS (BDV)
+// ========================================
+
+/**
+ * Parsea el texto de una notificación del Banco de Venezuela (BDV).
+ * Soporta 3 formatos:
+ *   1. PagomovilBDV: "Recibiste un PagomovilBDV por Bs.874,00 del 0414-1649377 Ref: 924138321095 ..."
+ *   2. Transferencia otros bancos: "Recibiste una transferencia de otros bancos de NOMBRE por Bs. 873,60 bajo el número de operación 00516851."
+ *   3. Transferencia BDV: "Recibiste una transferencia BDV de NOMBRE por Bs.2.345,00 bajo el numero de operacion 059133209947"
+ *
+ * @param {string} title - Título de la notificación (ej: "PagomovilBDV recibido")
+ * @param {string} text  - Cuerpo de la notificación
+ * @returns {{ ref: string, amountBs: number, type: string, name: string|null, phone: string|null } | null}
+ */
+function parseBankNotification(title, text) {
+  if (!text) return null;
+
+  // Limpiar comillas que a veces envuelven el texto de transferencias BDV
+  const cleanText = text.replace(/^["']|["']$/g, '').trim();
+  const titleLower = (title || '').toLowerCase();
+
+  // ── Formato 1: PagomovilBDV ──
+  // "Recibiste un PagomovilBDV por Bs.874,00 del 0414-1649377 Ref: 924138321095 en fecha ..."
+  if (titleLower.includes('pagomovil') || cleanText.toLowerCase().includes('pagomovilbdv')) {
+    const amountMatch = cleanText.match(/por\s+Bs\.?\s*([\d.,]+)/i);
+    const phoneMatch = cleanText.match(/del\s+([\d-]+)/i);
+    const refMatch = cleanText.match(/Ref:\s*(\d+)/i);
+
+    if (amountMatch && refMatch) {
+      return {
+        ref: refMatch[1].trim(),
+        amountBs: parseBsAmount(amountMatch[1]),
+        type: 'pagomovil',
+        name: null,
+        phone: phoneMatch ? phoneMatch[1].trim() : null
+      };
+    }
+  }
+
+  // ── Formato 2: Transferencia de otros bancos ──
+  // "Recibiste una transferencia de otros bancos de NOMBRE por Bs. 873,60 bajo el número de operación 00516851."
+  if (titleLower.includes('otros bancos') || cleanText.toLowerCase().includes('transferencia de otros bancos')) {
+    const match = cleanText.match(/transferencia de otros bancos de\s+(.+?)\s+por\s+Bs\.?\s*([\d.,]+)\s+bajo\s+(?:el\s+)?n[uú]mero\s+de\s+operaci[oó]n\s+(\d+)/i);
+    if (match) {
+      return {
+        ref: match[3].trim(),
+        amountBs: parseBsAmount(match[2]),
+        type: 'transferencia_otros',
+        name: match[1].trim(),
+        phone: null
+      };
+    }
+  }
+
+  // ── Formato 3: Transferencia BDV (mismo banco) ──
+  // "Recibiste una transferencia BDV de NOMBRE por Bs.2.345,00 bajo el numero de operacion 059133209947"
+  if (titleLower.includes('transferencia bdv') || cleanText.toLowerCase().includes('transferencia bdv')) {
+    const match = cleanText.match(/transferencia\s+BDV\s+de\s+(.+?)\s+por\s+Bs\.?\s*([\d.,]+)\s+bajo\s+(?:el\s+)?numero\s+de\s+operacion\s+(\d+)/i);
+    if (match) {
+      return {
+        ref: match[3].trim(),
+        amountBs: parseBsAmount(match[2]),
+        type: 'transferencia_bdv',
+        name: match[1].trim(),
+        phone: null
+      };
+    }
+  }
+
+  // ── No reconocido ──
+  return null;
+}
+
+/**
+ * Convierte un string de monto en Bs venezolano a número.
+ * Maneja formatos como: "874,00", "2.345,00", "873,60", "460.621,98"
+ * En Venezuela: punto = separador de miles, coma = decimales.
+ */
+function parseBsAmount(amountStr) {
+  if (!amountStr) return 0;
+  // Quitar puntos de miles, reemplazar coma decimal por punto
+  const cleaned = amountStr.replace(/\./g, '').replace(',', '.');
+  const num = parseFloat(cleaned);
+  return isNaN(num) ? 0 : num;
+}
+
+// ========================================
 // 4.5 SISTEMA ANTI-XSS Y LIMPIEZA AUTOMÁTICA
 // ========================================
 
@@ -599,6 +686,68 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
     }
     orderQueue.add(() => executeProcess(order, storeName, dbRef));
     return;
+  }
+
+  // ── CHECK DEL BAÚL DE PAGOS BANCARIOS (Solo AccessPlay, pedidos pending no-wallet) ──
+  if (storeName === 'AccessPlay' && order.status === 'pending') {
+    const orderRefs = [];
+    if (Array.isArray(order.ocrNumbers)) orderRefs.push(...order.ocrNumbers.map(r => String(r).trim()));
+    if (order.manualRef) orderRefs.push(String(order.manualRef).trim());
+
+    if (orderRefs.length > 0) {
+      try {
+        const vaultRef = appInstance.database().ref('bank_vault');
+        const vaultSnap = await vaultRef.once('value');
+        const vaultData = vaultSnap.val();
+
+        if (vaultData) {
+          for (const [vaultKey, vaultEntry] of Object.entries(vaultData)) {
+            if (vaultEntry.used) continue; // Ya fue usada
+
+            const vaultRefStr = String(vaultEntry.ref || '').trim();
+            if (!vaultRefStr) continue;
+
+            const refMatch = orderRefs.some(r => r === vaultRefStr);
+            if (!refMatch) continue;
+
+            // Verificar monto: pagó al menos el 99% del precio (pagar de más siempre es OK)
+            if (order.priceBs) {
+              const expectedBs = parseFloat(order.priceBs);
+              const minAcceptable = expectedBs * 0.99; // 1% menos permitido
+              if (vaultEntry.amountBs < minAcceptable) {
+                console.log(`⚠️ [AccessPlay] Vault ref ${vaultRefStr} coincide con #${orderId} pero monto insuficiente: Banco=Bs.${vaultEntry.amountBs} vs Mínimo=Bs.${minAcceptable.toFixed(2)}`);
+                continue;
+              }
+            }
+
+            // ¡Match! Pago adelantado encontrado
+            console.log(`🏦✅ [AccessPlay] Pago adelantado encontrado en vault para pedido #${orderId} (Ref: ${vaultRefStr})`);
+
+            // Marcar como usada en vault
+            await vaultRef.child(vaultKey).update({ used: true, matchedOrder: orderId });
+
+            // Marcar botProcessed para que el flujo normal no lo procese también
+            await dbRef.update({ botProcessed: true });
+
+            // Auto-aprobar
+            const bankInfo = {
+              ref: vaultEntry.ref,
+              amountBs: vaultEntry.amountBs,
+              type: vaultEntry.type || 'desconocido',
+              name: vaultEntry.name || null,
+              phone: vaultEntry.phone || null
+            };
+
+            autoApproveOrder(orderId, 'AccessPlay', bankInfo).catch(e => {
+              console.error(`❌ [AccessPlay] Error auto-aprobando desde vault para #${orderId}:`, e);
+            });
+            return; // Salir de processNewOrder, ya se encargó autoApproveOrder
+          }
+        }
+      } catch(e) {
+        console.error(`Error revisando bank_vault para #${orderId}:`, e);
+      }
+    }
   }
 
   // Si no tiene captura y es el primer aviso, implementamos el ciclo de búsqueda de 60 segundos
@@ -923,6 +1072,174 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
   } catch (error) {
     console.error(`❌ [${storeName}] Error enviando a Telegram:`, error.message);
   }
+}
+
+// ========================================
+// 6.5 AUTO-APROBACIÓN POR NOTIFICACIÓN BANCARIA
+// ========================================
+
+/**
+ * Auto-aprueba un pedido pendiente. Replica EXACTAMENTE la lógica del botón
+ * "✅ Aprobar" del callback_query handler, incluyendo:
+ *   - Despacho de API (processApiTopupFromTelegram) si tiene apiProvider
+ *   - VIP rewards y cashback
+ *   - Wallet recharge y referidos
+ *   - Notificación al usuario
+ *   - Actualización de botones de Telegram
+ *   - Polling si la API queda en "processing"
+ *
+ * @param {string} orderId    - ID del pedido a aprobar
+ * @param {string} storeName  - Nombre de la tienda (ej: 'AccessPlay')
+ * @param {object} bankInfo   - Info del pago bancario { ref, amountBs, type, name, phone }
+ * @returns {Promise<boolean>} true si se procesó, false si ya no era pending
+ */
+async function autoApproveOrder(orderId, storeName, bankInfo) {
+  const appInstance = storeApps[storeName];
+  const botConfig = bots[storeName];
+  if (!appInstance || !botConfig) return false;
+
+  const dbRef = appInstance.database().ref('orders/' + orderId);
+  const snap = await dbRef.once('value');
+  const orderData = snap.val();
+
+  if (!orderData || orderData.status !== 'pending') {
+    console.log(`[${storeName}] ⚠️ autoApproveOrder: Pedido #${orderId} ya no es pending (${orderData?.status}). Saltando.`);
+    return false;
+  }
+
+  // No auto-aprobar pagos de billetera (esos ya tienen su flujo propio)
+  if (orderData.paymentMethodId === 'wallet' || orderData.paymentMethodId === 'pin-redemption') {
+    console.log(`[${storeName}] ⚠️ autoApproveOrder: Pedido #${orderId} es de billetera/PIN. Saltando.`);
+    return false;
+  }
+
+  console.log(`[${storeName}] 🤖🏦 AUTO-APROBANDO pedido #${orderId} (Ref banco: ${bankInfo.ref}, Bs.${bankInfo.amountBs})`);
+
+  let newStatus = 'completed';
+  let buttonText = '✅ AUTO-APROBADO (Banco)';
+  let adminNote = `Aprobado automáticamente por pago bancario (Ref: ${bankInfo.ref})`;
+
+  // ── Despacho de API (igual que el botón Aprobar) ──
+  const hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '';
+  if (hasApi) {
+    // Actualizar Telegram con botón de "procesando" si tiene mensaje
+    if (orderData.telegramMessageId) {
+      try {
+        await botConfig.bot.editMessageReplyMarkup(
+          { inline_keyboard: [[{ text: '⏳ Auto-procesando (Banco)...', callback_data: 'noop' }], [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]] },
+          { chat_id: botConfig.chatId, message_id: orderData.telegramMessageId }
+        );
+      } catch(e) {}
+    }
+
+    console.log(`[${storeName}] 🤖 Pedido #${orderId} tiene API configurada. Disparando recarga...`);
+    try {
+      const apiRes = await processApiTopupFromTelegram(orderData, appInstance);
+      console.log(`[${storeName}] 🤖 Respuesta API para #${orderId}:`, apiRes);
+      newStatus = apiRes.status;
+      buttonText = apiRes.msg;
+      adminNote = apiRes.dbNote || adminNote;
+    } catch(e) {
+      console.error(`[${storeName}] Error en API desde autoApproveOrder:`, e);
+    }
+  }
+
+  // ── Actualizar estado en Firebase ──
+  const statusHistory = orderData.statusHistory || [];
+  statusHistory.push({ status: newStatus, timestamp: new Date().toISOString(), note: adminNote });
+
+  await dbRef.update({
+    status: newStatus,
+    adminNote,
+    updatedAt: new Date().toISOString(),
+    statusHistory
+  });
+
+  // ── Actualizar botones de Telegram ──
+  if (orderData.telegramMessageId) {
+    const finalMarkup = {
+      inline_keyboard: [
+        [{ text: buttonText, callback_data: 'noop' }],
+        [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+      ]
+    };
+    try {
+      await botConfig.bot.editMessageReplyMarkup(finalMarkup, { chat_id: botConfig.chatId, message_id: orderData.telegramMessageId });
+    } catch(e) { console.error(`[${storeName}] Error actualizando markup en autoApprove:`, e.message); }
+  }
+
+  // ── Aplicar VIP, cashback, referidos, notificaciones ──
+  if (newStatus === 'completed') {
+    await applyVipRewards(orderData, appInstance, storeName);
+    await applyWalletAndReferralRewards(orderData, appInstance, storeName);
+
+    try {
+      if (orderData.userId) {
+        await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
+          title: orderData.productType === 'wallet-recharge' ? 'Recarga Exitosa 💵' : 'Pedido Completado ✅',
+          body: orderData.productType === 'wallet-recharge'
+            ? `Tu recarga de monedero por $${parseFloat(orderData.priceUsd||0).toFixed(2)} ha sido procesada con éxito.`
+            : `Tu pedido de ${orderData.productName} ha sido procesado con éxito.${adminNote ? ` Nota: ${adminNote}` : ''}`,
+          type: orderData.productType === 'wallet-recharge' ? 'wallet' : 'order',
+          timestamp: new Date().toISOString(),
+          read: false
+        });
+      }
+    } catch(e) { console.error('Error enviando notificación en autoApprove:', e); }
+
+    // Entrega de códigos
+    if (adminNote && (adminNote.includes('Código entregado') || adminNote.includes('Códigos entregados'))) {
+      const codeMsg = `🤖 <b>ENTREGA AUTOMÁTICA — #${orderId}</b>\n\n${adminNote}`;
+      await botConfig.bot.sendMessage(botConfig.chatId, codeMsg, { parse_mode: 'HTML' }).catch(console.error);
+    }
+  }
+
+  if (newStatus === 'rejected') {
+    try {
+      if (orderData.userId) {
+        await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
+          title: 'Pedido Rechazado ❌',
+          body: `Tu pedido de ${orderData.productName || 'producto'} ha sido rechazado. Nota: ${adminNote || 'Rechazado por API'}`,
+          type: 'order',
+          timestamp: new Date().toISOString(),
+          read: false
+        });
+      }
+    } catch (e) { console.error('Error enviando notificación de rechazo en autoApprove:', e); }
+  }
+
+  if (newStatus === 'processing') {
+    try {
+      if (orderData.userId) {
+        await appInstance.database().ref('users/' + orderData.userId + '/notifications').push({
+          title: 'Pedido en Proceso ⚙️',
+          body: `Tu pedido de ${orderData.productName || 'producto'} ahora está: PROCESANDO ⚙️.`,
+          type: 'order',
+          timestamp: new Date().toISOString(),
+          read: false
+        });
+      }
+    } catch (e) { console.error('Error enviando notificación de proceso en autoApprove:', e); }
+
+    // Iniciar polling para verificar cuando la API termine
+    pollApiStatus(orderId, orderData, appInstance, storeName, botConfig.chatId, orderData.telegramMessageId || null);
+  }
+
+  // ── Mensaje de confirmación al admin en Telegram ──
+  const typeLabel = bankInfo.type === 'pagomovil' ? 'Pago Móvil' : bankInfo.type === 'transferencia_bdv' ? 'Transferencia BDV' : 'Transferencia Otros Bancos';
+  const confirmMsg = `🤖🏦 <b>PEDIDO AUTO-APROBADO — #${orderId}</b>\n\n` +
+    `✅ Estado: <b>${newStatus.toUpperCase()}</b>\n` +
+    `🔢 Ref Banco: <code>${bankInfo.ref}</code>\n` +
+    `💰 Monto Banco: Bs. ${bankInfo.amountBs.toFixed(2)}\n` +
+    `🏦 Tipo: ${typeLabel}\n` +
+    (bankInfo.name ? `👤 Pagador: ${bankInfo.name}\n` : '') +
+    (bankInfo.phone ? `📱 Tel: ${bankInfo.phone}\n` : '') +
+    `📝 Nota: ${adminNote}`;
+
+  await botConfig.bot.sendMessage(botConfig.chatId, confirmMsg, { parse_mode: 'HTML' }).catch(console.error);
+
+  console.log(`✅ [${storeName}] Pedido #${orderId} AUTO-APROBADO por banco. Status: ${newStatus}`);
+  return true;
 }
 
 // ========================================
@@ -1398,6 +1715,165 @@ function startListening() {
   });
 
   console.log('🚀 CEREBRO CENTRAL EN LÍNEA Y ESPERANDO PEDIDOS...');
+
+  // ========================================
+  // 7.5 LISTENER DE NOTIFICACIONES BANCARIAS (Solo AccessPlay)
+  // ========================================
+  const bankNotifRef = accessPlayApp.database().ref('bank_notifications');
+  const bankVaultRef = accessPlayApp.database().ref('bank_vault');
+  const accessPlayBotConfig = bots['AccessPlay'];
+
+  bankNotifRef.on('child_added', async (snapshot) => {
+    const notifData = snapshot.val();
+    const notifId = snapshot.key;
+
+    // Ignorar notificaciones ya procesadas o viejas (más de 5 minutos al arrancar)
+    if (!notifData || notifData.processed) return;
+    if (notifData.receivedAt && (Date.now() - notifData.receivedAt) > 5 * 60 * 1000) {
+      // Marcar como procesada silenciosamente para no reprocesar al reiniciar
+      await bankNotifRef.child(notifId).update({ processed: true }).catch(() => {});
+      return;
+    }
+
+    // Marcar como procesada inmediatamente para evitar doble procesamiento
+    await bankNotifRef.child(notifId).update({ processed: true });
+
+    console.log(`\n🏦 [AccessPlay] Nueva notificación bancaria recibida: ${notifId}`);
+
+    // ── Parsear la notificación ──
+    const parsed = parseBankNotification(notifData.title, notifData.text);
+    if (!parsed) {
+      console.log(`⚠️ [AccessPlay] No se pudo parsear la notificación bancaria. Texto: "${notifData.text}"`);
+      // Notificar al admin que llegó algo pero no se reconoció el formato
+      const unknownMsg = `⚠️ <b>NOTIFICACIÓN BANCARIA NO RECONOCIDA</b>\n\n` +
+        `📝 Título: ${notifData.title || 'N/A'}\n` +
+        `📝 Texto: ${notifData.text || 'N/A'}\n\n` +
+        `<i>El formato no coincide con PagoMóvil, Transferencia BDV ni Transferencia de otros bancos.</i>`;
+      await accessPlayBotConfig.bot.sendMessage(accessPlayBotConfig.chatId, unknownMsg, { parse_mode: 'HTML' }).catch(console.error);
+      return;
+    }
+
+    console.log(`🏦 [AccessPlay] Pago parseado: Ref=${parsed.ref} Monto=Bs.${parsed.amountBs} Tipo=${parsed.type}`);
+
+    // ── Verificar si la referencia ya fue usada (anti-duplicados) ──
+    try {
+      const vaultSnap = await bankVaultRef.orderByChild('ref').equalTo(parsed.ref).once('value');
+      const vaultEntries = vaultSnap.val();
+      if (vaultEntries) {
+        const alreadyUsed = Object.values(vaultEntries).some(v => v.used === true);
+        if (alreadyUsed) {
+          console.log(`🚨 [AccessPlay] Ref ${parsed.ref} ya fue usada. Ignorando pago duplicado.`);
+          const dupMsg = `🚨 <b>PAGO BANCARIO DUPLICADO DETECTADO</b>\n\n` +
+            `🔢 Ref: <code>${parsed.ref}</code>\n` +
+            `💰 Monto: Bs. ${parsed.amountBs.toFixed(2)}\n\n` +
+            `<i>Esta referencia ya fue usada para aprobar un pedido anterior. Ignorando.</i>`;
+          await accessPlayBotConfig.bot.sendMessage(accessPlayBotConfig.chatId, dupMsg, { parse_mode: 'HTML' }).catch(console.error);
+          return;
+        }
+      }
+    } catch(e) { console.error('Error verificando vault duplicados:', e); }
+
+    // ── Buscar pedido pendiente que coincida ──
+    let matchedOrderId = null;
+    try {
+      const ordersSnap = await accessPlayApp.database().ref('orders').orderByChild('status').equalTo('pending').once('value');
+      const pendingOrders = ordersSnap.val() || {};
+
+      for (const [orderId, order] of Object.entries(pendingOrders)) {
+        // Excluir pagos de billetera/PIN
+        if (order.paymentMethodId === 'wallet' || order.paymentMethodId === 'pin-redemption') continue;
+
+        // Buscar si la referencia bancaria coincide con alguna ref del pedido
+        const orderRefs = [];
+        if (Array.isArray(order.ocrNumbers)) orderRefs.push(...order.ocrNumbers.map(r => String(r).trim()));
+        if (order.manualRef) orderRefs.push(String(order.manualRef).trim());
+
+        const refMatches = orderRefs.some(r => r === parsed.ref);
+        if (!refMatches) continue;
+
+        // Verificar monto: pagó al menos el 99% del precio (pagar de más siempre es OK)
+        if (order.priceBs) {
+          const expectedBs = parseFloat(order.priceBs);
+          const minAcceptable = expectedBs * 0.99; // 1% menos permitido
+          if (parsed.amountBs < minAcceptable) {
+            console.log(`⚠️ [AccessPlay] Ref ${parsed.ref} coincide con #${orderId} pero monto insuficiente: Banco=Bs.${parsed.amountBs} vs Mínimo=Bs.${minAcceptable.toFixed(2)}`);
+            continue;
+          }
+        }
+
+        matchedOrderId = orderId;
+        break;
+      }
+    } catch(e) {
+      console.error('Error buscando órdenes pendientes para banco:', e);
+    }
+
+    // ── Si encontramos match: AUTO-APROBAR ──
+    if (matchedOrderId) {
+      console.log(`✅ [AccessPlay] Match encontrado: Ref ${parsed.ref} → Pedido #${matchedOrderId}`);
+
+      // Guardar en vault como "usada"
+      await bankVaultRef.push({
+        ref: parsed.ref,
+        amountBs: parsed.amountBs,
+        type: parsed.type,
+        name: parsed.name || null,
+        phone: parsed.phone || null,
+        matchedOrder: matchedOrderId,
+        used: true,
+        timestamp: Date.now()
+      }).catch(console.error);
+
+      // Auto-aprobar
+      try {
+        await autoApproveOrder(matchedOrderId, 'AccessPlay', parsed);
+      } catch(e) {
+        console.error(`❌ [AccessPlay] Error en autoApproveOrder para #${matchedOrderId}:`, e);
+      }
+      return;
+    }
+
+    // ── Sin match: guardar como pago adelantado y notificar ──
+    console.log(`⚠️ [AccessPlay] Sin match para Ref ${parsed.ref}. Guardando en bank_vault y notificando.`);
+
+    const vaultEntry = await bankVaultRef.push({
+      ref: parsed.ref,
+      amountBs: parsed.amountBs,
+      type: parsed.type,
+      name: parsed.name || null,
+      phone: parsed.phone || null,
+      matchedOrder: null,
+      used: false,
+      timestamp: Date.now()
+    });
+
+    const typeLabel = parsed.type === 'pagomovil' ? 'Pago Móvil' : parsed.type === 'transferencia_bdv' ? 'Transferencia BDV' : 'Transferencia Otros Bancos';
+    const noMatchMsg = `⚠️ <b>PAGO RECIBIDO SIN MATCH AUTOMÁTICO</b>\n\n` +
+      `💰 Monto: Bs. ${parsed.amountBs.toFixed(2)}\n` +
+      `🔢 Ref: <code>${parsed.ref}</code>\n` +
+      (parsed.name ? `👤 Nombre: ${parsed.name}\n` : '') +
+      (parsed.phone ? `📱 Tel: ${parsed.phone}\n` : '') +
+      `🏦 Tipo: ${typeLabel}\n\n` +
+      `<i>No se encontró un pedido pendiente con esta referencia.\nProcede a la aprobación manual desde el Panel Admin o Telegram.</i>`;
+
+    await accessPlayBotConfig.bot.sendMessage(accessPlayBotConfig.chatId, noMatchMsg, { parse_mode: 'HTML' }).catch(console.error);
+
+    // ── Recordatorio a los 2 minutos ──
+    const vaultKey = vaultEntry.key;
+    setTimeout(async () => {
+      try {
+        const checkSnap = await bankVaultRef.child(vaultKey).once('value');
+        const checkData = checkSnap.val();
+        if (checkData && !checkData.used) {
+          const reminderMsg = `⏰ <b>RECORDATORIO</b>: Pago Bs. ${parsed.amountBs.toFixed(2)} (Ref: <code>${parsed.ref}</code>) aún sin aprobar.\n\n` +
+            `<i>Han pasado 2 minutos. Si corresponde a un pedido, apruébalo manualmente.</i>`;
+          await accessPlayBotConfig.bot.sendMessage(accessPlayBotConfig.chatId, reminderMsg, { parse_mode: 'HTML' }).catch(console.error);
+        }
+      } catch(e) { console.error('Error en recordatorio bancario:', e); }
+    }, 2 * 60 * 1000); // 2 minutos
+  });
+
+  console.log('🏦 Escuchando notificaciones bancarias para AccessPlay...');
 }
 
 // ========================================
@@ -2554,9 +3030,58 @@ async function repairFrozenButtons() {
 // 2. Limpiar pedidos maliciosos (XSS)
 // 3. Reparar botones congelados en mensajes viejos
 // 4. Iniciar los listeners en tiempo real
+// 5. Iniciar limpieza periódica del baúl bancario
 (async () => {
   await clearAllWebhooks();
   await cleanupMaliciousOrders();
   await repairFrozenButtons();
   startListening();
+
+  // ── Limpieza periódica del baúl de pagos bancarios (cada 1 hora) ──
+  setInterval(async () => {
+    try {
+      const cutoff = Date.now() - (24 * 60 * 60 * 1000); // 24 horas
+      const db = accessPlayApp.database();
+
+      // Limpiar bank_vault (entries > 24h)
+      const vaultSnap = await db.ref('bank_vault').once('value');
+      const vaultData = vaultSnap.val();
+      if (vaultData) {
+        const updates = {};
+        let cleaned = 0;
+        for (const [key, entry] of Object.entries(vaultData)) {
+          if (entry.timestamp && entry.timestamp < cutoff) {
+            updates[key] = null; // null = eliminar en Firebase
+            cleaned++;
+          }
+        }
+        if (cleaned > 0) {
+          await db.ref('bank_vault').update(updates);
+          console.log(`🧹 [Vault] Limpieza: ${cleaned} entries antiguas eliminadas del baúl bancario.`);
+        }
+      }
+
+      // Limpiar bank_notifications (procesadas y > 24h)
+      const notifSnap = await db.ref('bank_notifications').once('value');
+      const notifData = notifSnap.val();
+      if (notifData) {
+        const updates = {};
+        let cleaned = 0;
+        for (const [key, entry] of Object.entries(notifData)) {
+          if (entry.receivedAt && entry.receivedAt < cutoff) {
+            updates[key] = null;
+            cleaned++;
+          }
+        }
+        if (cleaned > 0) {
+          await db.ref('bank_notifications').update(updates);
+          console.log(`🧹 [BankNotif] Limpieza: ${cleaned} notificaciones antiguas eliminadas.`);
+        }
+      }
+    } catch(e) {
+      console.error('❌ Error en limpieza periódica del baúl bancario:', e.message);
+    }
+  }, 60 * 60 * 1000); // Cada 1 hora
+
+  console.log('🧹 Limpieza periódica del baúl bancario programada (cada 1 hora).');
 })();
