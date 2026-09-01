@@ -2626,8 +2626,8 @@ Object.keys(bots).forEach(storeName => {
         const snap = await dbRef.once('value');
         const orderData = snap.val();
 
-        if (!orderData || orderData.status !== 'pending') {
-          console.log(`[${storeName}] ⚠️ Pedido no existe o ya procesado: #${orderId}`);
+        if (!orderData || (orderData.status !== 'pending' && orderData.status !== 'processing')) {
+          console.log(`[${storeName}] ⚠️ Pedido no existe o ya finalizado: #${orderId} (status: ${orderData?.status})`);
           try {
             await botConfig.bot.editMessageReplyMarkup(
               { inline_keyboard: [[{ text: '⚠️ Pedido ya procesado o no existe', callback_data: 'noop' }], [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]] },
