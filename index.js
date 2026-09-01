@@ -861,6 +861,59 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
   if (finalOcrNumbers.length > 0) {
     await dbRef.update({ ocrNumbers: finalOcrNumbers });
     
+    // ── Revisar bank_vault usando los números del OCR ──
+    if (storeName === 'AccessPlay' && order.status === 'pending' && order.paymentMethodId !== 'wallet') {
+      try {
+        const vaultSnap = await appInstance.database().ref('bank_vault').orderByChild('used').equalTo(false).once('value');
+        const vaultEntries = vaultSnap.val();
+        if (vaultEntries) {
+          for (const [vaultKey, vaultEntry] of Object.entries(vaultEntries)) {
+            const vaultRefStr = String(vaultEntry.ref).trim();
+            if (finalOcrNumbers.includes(vaultRefStr)) {
+              // Match encontrado en el baúl
+              console.log(`🏦✅ [AccessPlay] Pago adelantado encontrado en vault (tras OCR) para pedido #${order.id} (Ref: ${vaultRefStr})`);
+              
+              const expectedBs = parseFloat(order.priceBs);
+              const minAcceptable = expectedBs * 0.99; // Tolerancia 1%
+
+              // Marcar como usada en vault
+              await appInstance.database().ref('bank_vault').child(vaultKey).update({ used: true, matchedOrder: order.id });
+              await dbRef.update({ botProcessed: true });
+
+              const bankInfo = {
+                ref: vaultEntry.ref,
+                amountBs: vaultEntry.amountBs,
+                type: vaultEntry.type || 'desconocido',
+                name: vaultEntry.name || null,
+                phone: vaultEntry.phone || null
+              };
+
+              if (vaultEntry.amountBs < minAcceptable) {
+                // Pago insuficiente -> Rechazar
+                console.log(`⚠️ [AccessPlay] Monto insuficiente: Banco=Bs.${vaultEntry.amountBs} vs Mínimo=Bs.${minAcceptable.toFixed(2)}. Auto-rechazando.`);
+                await dbRef.update({ 
+                  status: 'rejected', 
+                  adminNote: `Rechazado auto: Pago insuficiente (Recibido Bs.${vaultEntry.amountBs}, Esperado Bs.${expectedBs})` 
+                });
+                
+                const storeConfig = bots[storeName];
+                const rejectMsg = `❌ <b>PEDIDO RECHAZADO AUTO</b>\n\nEl pedido <b>#${order.id}</b> fue rechazado automáticamente.\nMotivo: <i>Monto insuficiente (Recibido Bs. ${vaultEntry.amountBs.toFixed(2)}, Esperado Bs. ${expectedBs.toFixed(2)})</i>.`;
+                await storeConfig.bot.sendMessage(storeConfig.chatId, rejectMsg, { parse_mode: 'HTML' }).catch(console.error);
+                
+                return; // Salir, ya procesado
+              } else {
+                // Monto correcto -> Aprobar
+                await autoApproveOrder(order.id, 'AccessPlay', bankInfo);
+                return; // Salir, ya procesado
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`Error revisando bank_vault tras OCR para #${order.id}:`, e);
+      }
+    }
+
     // Buscar si esta referencia ya existe en otros pedidos (últimos 150 pedidos)
     try {
       const snap = await dbRef.parent.orderByChild('createdAt').limitToLast(150).once('value');
