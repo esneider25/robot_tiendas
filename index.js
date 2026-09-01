@@ -1072,6 +1072,24 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
   } catch (error) {
     console.error(`❌ [${storeName}] Error enviando a Telegram:`, error.message);
   }
+
+  // ── Recordatorio a los 2 minutos para pedidos que quedan PENDIENTES ──
+  if (order.status === 'pending' && order.paymentMethodId !== 'wallet' && dbRef) {
+    setTimeout(async () => {
+      try {
+        const snap = await dbRef.once('value');
+        const checkOrder = snap.val();
+        // Si después de 2 minutos SIGUE pendiente (no lo han aprobado ni manual ni automáticamente por banco)
+        if (checkOrder && checkOrder.status === 'pending') {
+          const reminderMsg = `⏰ <b>RECORDATORIO</b>: El pedido <b>#${order.id}</b> sigue PENDIENTE de aprobación.\n\n` +
+            `<i>Han pasado 2 minutos y no se ha encontrado el pago bancario automático. Procede a la aprobación o rechazo manual.</i>`;
+          await storeConfig.bot.sendMessage(storeConfig.chatId, reminderMsg, { parse_mode: 'HTML' }).catch(console.error);
+        }
+      } catch(e) {
+        console.error(`Error en recordatorio de 2 min para pedido #${order.id}:`, e);
+      }
+    }, 2 * 60 * 1000); // 2 minutos
+  }
 }
 
 // ========================================
@@ -1833,10 +1851,10 @@ function startListening() {
       return;
     }
 
-    // ── Sin match: guardar como pago adelantado y notificar ──
-    console.log(`⚠️ [AccessPlay] Sin match para Ref ${parsed.ref}. Guardando en bank_vault y notificando.`);
+    // ── Sin match: guardar como pago adelantado silenciosamente ──
+    console.log(`⚠️ [AccessPlay] Sin match para Ref ${parsed.ref}. Guardando en bank_vault silenciosamente.`);
 
-    const vaultEntry = await bankVaultRef.push({
+    await bankVaultRef.push({
       ref: parsed.ref,
       amountBs: parsed.amountBs,
       type: parsed.type,
@@ -1846,31 +1864,6 @@ function startListening() {
       used: false,
       timestamp: Date.now()
     });
-
-    const typeLabel = parsed.type === 'pagomovil' ? 'Pago Móvil' : parsed.type === 'transferencia_bdv' ? 'Transferencia BDV' : 'Transferencia Otros Bancos';
-    const noMatchMsg = `⚠️ <b>PAGO RECIBIDO SIN MATCH AUTOMÁTICO</b>\n\n` +
-      `💰 Monto: Bs. ${parsed.amountBs.toFixed(2)}\n` +
-      `🔢 Ref: <code>${parsed.ref}</code>\n` +
-      (parsed.name ? `👤 Nombre: ${parsed.name}\n` : '') +
-      (parsed.phone ? `📱 Tel: ${parsed.phone}\n` : '') +
-      `🏦 Tipo: ${typeLabel}\n\n` +
-      `<i>No se encontró un pedido pendiente con esta referencia.\nProcede a la aprobación manual desde el Panel Admin o Telegram.</i>`;
-
-    await accessPlayBotConfig.bot.sendMessage(accessPlayBotConfig.chatId, noMatchMsg, { parse_mode: 'HTML' }).catch(console.error);
-
-    // ── Recordatorio a los 2 minutos ──
-    const vaultKey = vaultEntry.key;
-    setTimeout(async () => {
-      try {
-        const checkSnap = await bankVaultRef.child(vaultKey).once('value');
-        const checkData = checkSnap.val();
-        if (checkData && !checkData.used) {
-          const reminderMsg = `⏰ <b>RECORDATORIO</b>: Pago Bs. ${parsed.amountBs.toFixed(2)} (Ref: <code>${parsed.ref}</code>) aún sin aprobar.\n\n` +
-            `<i>Han pasado 2 minutos. Si corresponde a un pedido, apruébalo manualmente.</i>`;
-          await accessPlayBotConfig.bot.sendMessage(accessPlayBotConfig.chatId, reminderMsg, { parse_mode: 'HTML' }).catch(console.error);
-        }
-      } catch(e) { console.error('Error en recordatorio bancario:', e); }
-    }, 2 * 60 * 1000); // 2 minutos
   });
 
   console.log('🏦 Escuchando notificaciones bancarias para AccessPlay...');
