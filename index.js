@@ -9,6 +9,9 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
+// Variable global de apagado de emergencia
+global.isAutomationEnabled = true;
+
 // ========================================
 // 1. CARGAR CLAVES DE FIREBASE
 // ========================================
@@ -870,7 +873,7 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
     await dbRef.update({ ocrNumbers: finalOcrNumbers });
     
     // ── Revisar bank_vault usando los números del OCR ──
-    if (storeName === 'AccessPlay' && order.status === 'pending' && order.paymentMethodId !== 'wallet') {
+    if (global.isAutomationEnabled && storeName === 'AccessPlay' && order.status === 'pending' && order.paymentMethodId !== 'wallet') {
       try {
         const vaultSnap = await storeApps[storeName].database().ref('bank_vault').orderByChild('used').equalTo(false).once('value');
         const vaultEntries = vaultSnap.val();
@@ -1845,8 +1848,9 @@ function startListening() {
 
     // ── Buscar pedido pendiente que coincida ──
     let matchedOrderId = null;
-    try {
-      const ordersSnap = await accessPlayApp.database().ref('orders').orderByChild('status').equalTo('pending').once('value');
+    if (global.isAutomationEnabled) {
+      try {
+        const ordersSnap = await accessPlayApp.database().ref('orders').orderByChild('status').equalTo('pending').once('value');
       const pendingOrders = ordersSnap.val() || {};
 
       for (const [orderId, order] of Object.entries(pendingOrders)) {
@@ -1909,6 +1913,7 @@ function startListening() {
       }
     } catch(e) {
       console.error('Error buscando órdenes pendientes para banco:', e);
+    }
     }
 
     // ── Si encontramos match: AUTO-APROBAR ──
@@ -2096,6 +2101,22 @@ Object.keys(bots).forEach(storeName => {
       } catch (e) {
         botConfig.bot.sendMessage(chatId, `❌ Error en reparación: ${e.message}`);
       }
+    }
+
+    if (msg.text && msg.text === '/apagar auto') {
+      const chatId = msg.chat.id;
+      if (chatId.toString() !== botConfig.chatId.toString()) return; // Solo admin
+      global.isAutomationEnabled = false;
+      botConfig.bot.sendMessage(chatId, `🛑 <b>AUTOMATIZACIÓN APAGADA</b> 🛑\n\nEl robot ya no aprobará ni rechazará pedidos automáticamente ni se conectará con Ujubii/TiendaGift. Todos los pedidos quedarán en "Pendiente" para que los apruebes manualmente mediante los botones de Telegram.`, { parse_mode: 'HTML' });
+      return;
+    }
+
+    if (msg.text && msg.text === '/encender auto') {
+      const chatId = msg.chat.id;
+      if (chatId.toString() !== botConfig.chatId.toString()) return; // Solo admin
+      global.isAutomationEnabled = true;
+      botConfig.bot.sendMessage(chatId, `✅ <b>AUTOMATIZACIÓN ENCENDIDA</b> ✅\n\nEl robot vuelve a tomar el control. Aprobará, rechazará y despachará pedidos automáticamente.`, { parse_mode: 'HTML' });
+      return;
     }
 
     if (msg.text && msg.text === '/reparar_gastos') {
