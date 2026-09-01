@@ -976,6 +976,13 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
       console.log(`⚡ [${storeName}] API habilitada. Disparando recarga automática para pedido de monedero #${order.id}`);
       try {
         const apiRes = await processApiTopupFromTelegram(order, appInstance);
+        
+        // Si la API indica que no hay producto válido, tratar como manual
+        if (apiRes.status === 'no-api') {
+          apiRes.status = 'processing';
+          apiRes.dbNote = 'Producto sin ID de API. Requiere entrega manual.';
+        }
+        
         order.status = apiRes.status;
         order.adminNote = apiRes.dbNote;
         const statusHistory = order.statusHistory || [];
@@ -1234,7 +1241,7 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
   let adminNote = `Aprobado automáticamente por pago bancario (Ref: ${bankInfo.ref})`;
 
   // ── Despacho de API (igual que el botón Aprobar) ──
-  const hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '';
+  let hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '';
   if (hasApi) {
     // Actualizar Telegram con botón de "procesando" si tiene mensaje
     if (orderData.telegramMessageId) {
@@ -1250,9 +1257,21 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
     try {
       const apiRes = await processApiTopupFromTelegram(orderData, appInstance);
       console.log(`[${storeName}] 🤖 Respuesta API para #${orderId}:`, apiRes);
-      newStatus = apiRes.status;
-      buttonText = apiRes.msg;
-      adminNote = apiRes.dbNote || adminNote;
+      
+      if (apiRes.status === 'no-api') {
+        // El producto tiene apiProvider pero no tiene apiProductId válido → Tratar como manual
+        newStatus = 'processing';
+        buttonText = '👆 ENTREGAR Y APROBAR (Pago OK)';
+        adminNote = `Pago verificado (Ref: ${bankInfo.ref}). ${apiRes.dbNote}`;
+        hasApi = false; // Para que el botón sea clickable
+
+        const manualMsg = `⚠️ <b>ENTREGA MANUAL REQUERIDA</b> ⚠️\n\nEl pedido #${orderId} de <b>${orderData.productName || 'Producto'}</b> ya fue pagado (Ref: <code>${bankInfo.ref}</code>).\n\n⚠️ ${apiRes.dbNote}\n\nDebes entregar el producto manualmente y luego hacer clic en el botón de Telegram.`;
+        botConfig.bot.sendMessage(botConfig.chatId, manualMsg, { parse_mode: 'HTML' }).catch(console.error);
+      } else {
+        newStatus = apiRes.status;
+        buttonText = apiRes.msg;
+        adminNote = apiRes.dbNote || adminNote;
+      }
     } catch(e) {
       console.error(`[${storeName}] Error en API desde autoApproveOrder:`, e);
     }
@@ -2676,9 +2695,16 @@ Object.keys(bots).forEach(storeName => {
             try {
               const apiRes = await processApiTopupFromTelegram(orderData, appInstance);
               console.log(`[${storeName}] 🤖 Respuesta API:`, apiRes);
-              newStatus = apiRes.status;
-              buttonText = apiRes.msg;
-              adminNote = apiRes.dbNote || adminNote;
+              if (apiRes.status === 'no-api') {
+                // Admin aprobó manualmente un producto sin API válida → completar directamente
+                newStatus = 'completed';
+                buttonText = '✅ PEDIDO APROBADO';
+                adminNote = 'Pedido realizado exitosamente (aprobado manualmente)';
+              } else {
+                newStatus = apiRes.status;
+                buttonText = apiRes.msg;
+                adminNote = apiRes.dbNote || adminNote;
+              }
             } catch(e) { console.error(`[${storeName}] Error en API desde bot:`, e); }
           }
 
@@ -2785,13 +2811,13 @@ async function processApiTopupFromTelegram(order, appInstance) {
   
   const apiIdx = parseInt(order.apiProvider);
   if (isNaN(apiIdx) || !apiConfigs[apiIdx] || !apiConfigs[apiIdx].enabled) {
-    return { status: 'completed', msg: '✅ APROBADO (Local)', dbNote: 'Pedido realizado exitosamente' };
+    return { status: 'no-api', msg: '⚠️ SIN API CONFIGURADA', dbNote: 'Producto sin API activa. Requiere entrega manual.' };
   }
   
   const api = apiConfigs[apiIdx];
   const apiProductId = parseInt(order.apiProductId);
   if (isNaN(apiProductId)) {
-    return { status: 'completed', msg: '✅ APROBADO (Local, Faltó ID Servicio)', dbNote: 'Pedido realizado exitosamente' };
+    return { status: 'no-api', msg: '⚠️ SIN ID DE PRODUCTO API', dbNote: 'Producto sin ID de servicio API. Requiere entrega manual.' };
   }
   
   const baseUrl = api.baseUrl.endsWith('/') ? api.baseUrl.slice(0, -1) : api.baseUrl;
