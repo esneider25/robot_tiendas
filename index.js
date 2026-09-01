@@ -430,9 +430,9 @@ function parseBankNotification(title, text) {
   const cleanText = text.replace(/^["']|["']$/g, '').trim();
   const titleLower = (title || '').toLowerCase();
 
-  // ── Formato 1: PagomovilBDV ──
+  // ── Formato 1: PagomovilBDV (con número de teléfono) ──
   // "Recibiste un PagomovilBDV por Bs.874,00 del 0414-1649377 Ref: 924138321095 en fecha ..."
-  if (titleLower.includes('pagomovil') || cleanText.toLowerCase().includes('pagomovilbdv')) {
+  if ((titleLower.includes('pagomovil') || cleanText.toLowerCase().includes('pagomovilbdv')) && cleanText.match(/del\s+([\d-]+)/i)) {
     const amountMatch = cleanText.match(/por\s+Bs\.?\s*([\d.,]+)/i);
     const phoneMatch = cleanText.match(/del\s+([\d-]+)/i);
     const refMatch = cleanText.match(/Ref:\s*(\d+)/i);
@@ -463,15 +463,17 @@ function parseBankNotification(title, text) {
     }
   }
 
-  // ── Formato 3: Transferencia BDV (mismo banco) ──
-  // "Recibiste una transferencia BDV de NOMBRE por Bs.2.345,00 bajo el numero de operacion 059133209947"
-  if (titleLower.includes('transferencia bdv') || cleanText.toLowerCase().includes('transferencia bdv')) {
-    const match = cleanText.match(/transferencia\s+BDV\s+de\s+(.+?)\s+por\s+Bs\.?\s*([\d.,]+)\s+bajo\s+(?:el\s+)?numero\s+de\s+operacion\s+(\d+)/i);
+  // ── Formato 3: Transferencia BDV o PagomovilBDV (con nombre) ──
+  // Transferencia: "Recibiste una transferencia BDV de NOMBRE por Bs.2.345,00 bajo el numero de operacion 059133209947"
+  // Pagomovil: "Recibiste un PagomovilBDV de FRANCIS DEL PEREZ VELASQUEZ por Bs.4.789,98  bajo el numero de operacion 007200396665"
+  if (cleanText.toLowerCase().includes('transferencia bdv') || cleanText.toLowerCase().includes('pagomovilbdv')) {
+    const match = cleanText.match(/(?:transferencia\s+BDV|PagomovilBDV)\s+de\s+(.+?)\s+por\s+Bs\.?\s*([\d.,]+)\s+bajo\s+(?:el\s+)?n[uú]mero\s+de\s+operaci[oó]n\s+(\d+)/i);
     if (match) {
+      const isPagomovil = cleanText.toLowerCase().includes('pagomovilbdv');
       return {
         ref: match[3].trim(),
         amountBs: parseBsAmount(match[2]),
-        type: 'transferencia_bdv',
+        type: isPagomovil ? 'pagomovil' : 'transferencia_bdv',
         name: match[1].trim(),
         phone: null
       };
