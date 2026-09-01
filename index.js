@@ -640,6 +640,27 @@ class PromiseQueue {
     });
   }
 }
+function isReferenceMatch(refA, refB) {
+  if (!refA || !refB) return false;
+  const a = String(refA).trim();
+  const b = String(refB).trim();
+  if (a === b) return true;
+  if (a.endsWith(b) || b.endsWith(a)) return true;
+  
+  // Buscar la subcadena común más larga
+  let maxMatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    for (let j = i + 1; j <= a.length; j++) {
+      const sub = a.substring(i, j);
+      if (b.includes(sub) && sub.length > maxMatch) {
+        maxMatch = sub.length;
+      }
+    }
+  }
+  // Permitir match si coinciden al menos 6 números seguidos
+  return maxMatch >= 6;
+}
+
 const orderQueue = new PromiseQueue(1);
 
 async function processNewOrder(orderId, storeName, appInstance, eventType) {
@@ -880,7 +901,8 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
         if (vaultEntries) {
           for (const [vaultKey, vaultEntry] of Object.entries(vaultEntries)) {
             const vaultRefStr = String(vaultEntry.ref).trim();
-            if (finalOcrNumbers.includes(vaultRefStr)) {
+            const matchFound = finalOcrNumbers.some(ocrRef => isReferenceMatch(vaultRefStr, ocrRef));
+            if (matchFound) {
               // Match encontrado en el baúl
               console.log(`🏦✅ [AccessPlay] Pago adelantado encontrado en vault (tras OCR) para pedido #${order.id} (Ref: ${vaultRefStr})`);
               
@@ -1881,7 +1903,7 @@ function startListening() {
         if (Array.isArray(order.ocrNumbers)) orderRefs.push(...order.ocrNumbers.map(r => String(r).trim()));
         if (order.manualRef) orderRefs.push(String(order.manualRef).trim());
 
-        const refMatches = orderRefs.some(r => r === parsed.ref);
+        const refMatches = orderRefs.some(r => isReferenceMatch(r, parsed.ref));
         if (!refMatches) continue;
 
         // Verificar monto: pagó al menos el 99% del precio (pagar de más siempre es OK)
