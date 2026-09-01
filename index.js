@@ -770,8 +770,12 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
         if (imageBuffer && pendingOrderIds.has(orderId)) {
           pendingOrderIds.delete(orderId);
           console.log(`✅ [${storeName}] Foto encontrada para #${orderId} (Intento ${attempts + 1}). Añadiendo a la cola...`);
-          order.screenshot = timestampedUrl;
-          orderQueue.add(() => executeProcess(order, storeName, dbRef, imageBuffer));
+          const currentSnap = await dbRef.once('value');
+          const currentOrder = currentSnap.val();
+          if (currentOrder) {
+            currentOrder.screenshot = timestampedUrl;
+            orderQueue.add(() => executeProcess(currentOrder, storeName, dbRef, imageBuffer));
+          }
         }
       } catch (e) {
         attempts++;
@@ -779,8 +783,12 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
           if (pendingOrderIds.has(orderId)) {
             pendingOrderIds.delete(orderId);
             console.log(`⚠️ [${storeName}] Expiró el tiempo de espera (1 minuto) para #${orderId}. Procesando sin foto.`);
-            order.screenshot = null;
-            orderQueue.add(() => executeProcess(order, storeName, dbRef));
+            const currentSnap = await dbRef.once('value');
+            const currentOrder = currentSnap.val();
+            if (currentOrder) {
+              currentOrder.screenshot = null;
+              orderQueue.add(() => executeProcess(currentOrder, storeName, dbRef));
+            }
           }
         } else {
           // Volver a intentar en 5 segundos
@@ -892,8 +900,10 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
                 // Pago insuficiente -> Rechazar
                 console.log(`⚠️ [AccessPlay] Monto insuficiente: Banco=Bs.${vaultEntry.amountBs} vs Mínimo=Bs.${minAcceptable.toFixed(2)}. Auto-rechazando.`);
                 order.status = 'rejected';
+                order.rejectReason = 'Monto insuficiente';
                 await dbRef.update({ 
                   status: 'rejected', 
+                  rejectReason: 'Monto insuficiente',
                   adminNote: `Rechazado auto: Pago insuficiente (Recibido Bs.${vaultEntry.amountBs}, Esperado Bs.${expectedBs})` 
                 });
                 
@@ -1857,7 +1867,40 @@ function startListening() {
           const minAcceptable = expectedBs * 0.99; // 1% menos permitido
           if (parsed.amountBs < minAcceptable) {
             console.log(`⚠️ [AccessPlay] Ref ${parsed.ref} coincide con #${orderId} pero monto insuficiente: Banco=Bs.${parsed.amountBs} vs Mínimo=Bs.${minAcceptable.toFixed(2)}`);
-            continue;
+            
+            // AUTO-RECHAZAR el pedido pendiente
+            const orderDbRef = accessPlayApp.database().ref('orders/' + orderId);
+            await orderDbRef.update({ 
+              status: 'rejected', 
+              botProcessed: true,
+              adminNote: `Rechazado auto: Pago insuficiente (Recibido Bs.${parsed.amountBs}, Esperado Bs.${expectedBs})` 
+            });
+
+            // Guardar en vault como "usada"
+            await bankVaultRef.push({
+              ref: parsed.ref,
+              amountBs: parsed.amountBs,
+              type: parsed.type,
+              name: parsed.name || null,
+              phone: parsed.phone || null,
+              matchedOrder: orderId,
+              used: true,
+              timestamp: Date.now()
+            }).catch(console.error);
+
+            // Actualizar el botón de la tarjeta en Telegram a RECHAZADO
+            if (order.telegramMessageId) {
+              const rejectMarkup = {
+                inline_keyboard: [
+                  [{ text: '❌ RECHAZADO (Monto insuficiente)', callback_data: 'ignore' }],
+                  [{ text: '🔍 Abrir Panel Admin', url: accessPlayBotConfig.adminUrl }]
+                ]
+              };
+              await accessPlayBotConfig.bot.editMessageReplyMarkup(rejectMarkup, { chat_id: accessPlayBotConfig.chatId, message_id: order.telegramMessageId }).catch(console.error);
+            }
+            
+            matchedOrderId = 'REJECTED'; // Para que no intente auto-aprobar más abajo ni guardarlo silencioso sin usar
+            break;
           }
         }
 
@@ -1869,6 +1912,8 @@ function startListening() {
     }
 
     // ── Si encontramos match: AUTO-APROBAR ──
+    if (matchedOrderId === 'REJECTED') return;
+
     if (matchedOrderId) {
       console.log(`✅ [AccessPlay] Match encontrado: Ref ${parsed.ref} → Pedido #${matchedOrderId}`);
 
