@@ -1226,6 +1226,15 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
     } catch(e) {
       console.error(`[${storeName}] Error en API desde autoApproveOrder:`, e);
     }
+  } else {
+    // Es un producto manual sin API. No auto-completar, sino dejar en "processing" para entrega manual.
+    newStatus = 'processing';
+    buttonText = '👆 ENTREGAR Y APROBAR (Pago OK)';
+    adminNote = `Pago verificado (Ref: ${bankInfo.ref}). Falta entrega manual.`;
+    
+    // Alerta por Telegram para que el admin sepa que debe entregar esto YA.
+    const manualMsg = `⚠️ <b>ENTREGA MANUAL REQUERIDA</b> ⚠️\n\nEl pedido #${orderId} de <b>${orderData.productName || 'Producto'}</b> ya fue pagado automáticamente (Ref: <code>${bankInfo.ref}</code>).\n\nComo es un producto manual sin API, debes ir al Panel Admin, entregar el producto y marcarlo como completado.`;
+    botConfig.bot.sendMessage(botConfig.chatId, manualMsg, { parse_mode: 'HTML' }).catch(console.error);
   }
 
   // ── Actualizar estado en Firebase ──
@@ -1243,7 +1252,7 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
   if (orderData.telegramMessageId) {
     const finalMarkup = {
       inline_keyboard: [
-        [{ text: buttonText, callback_data: 'noop' }],
+        [{ text: buttonText, callback_data: hasApi ? 'noop' : `approve_${orderId}` }],
         [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
       ]
     };
@@ -1305,8 +1314,10 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
       }
     } catch (e) { console.error('Error enviando notificación de proceso en autoApprove:', e); }
 
-    // Iniciar polling para verificar cuando la API termine
-    pollApiStatus(orderId, orderData, appInstance, storeName, botConfig.chatId, orderData.telegramMessageId || null);
+    // Iniciar polling para verificar cuando la API termine (solo si tiene API)
+    if (hasApi) {
+      pollApiStatus(orderId, orderData, appInstance, storeName, botConfig.chatId, orderData.telegramMessageId || null);
+    }
   }
 
   // (El mensaje de confirmación en texto fue eliminado para no spamear al admin con mensajes extra. El admin verá la tarjeta principal con el botón actualizado)
