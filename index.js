@@ -864,7 +864,7 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
     // ── Revisar bank_vault usando los números del OCR ──
     if (storeName === 'AccessPlay' && order.status === 'pending' && order.paymentMethodId !== 'wallet') {
       try {
-        const vaultSnap = await appInstance.database().ref('bank_vault').orderByChild('used').equalTo(false).once('value');
+        const vaultSnap = await storeApps[storeName].database().ref('bank_vault').orderByChild('used').equalTo(false).once('value');
         const vaultEntries = vaultSnap.val();
         if (vaultEntries) {
           for (const [vaultKey, vaultEntry] of Object.entries(vaultEntries)) {
@@ -877,7 +877,7 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
               const minAcceptable = expectedBs * 0.99; // Tolerancia 1%
 
               // Marcar como usada en vault
-              await appInstance.database().ref('bank_vault').child(vaultKey).update({ used: true, matchedOrder: order.id });
+              await storeApps[storeName].database().ref('bank_vault').child(vaultKey).update({ used: true, matchedOrder: order.id });
               await dbRef.update({ botProcessed: true });
 
               const bankInfo = {
