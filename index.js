@@ -354,12 +354,41 @@ async function performOCR(imageBuffer) {
     console.log('🖼️ Procesando imagen para mejorar legibilidad...');
     const image = await Jimp.read(imageBuffer);
     
-    // Escalar la imagen x2, ponerla en escala de grises y subir el contraste
-    // Esto ayuda muchísimo a fuentes delgadas como la del BDV
-    image.scale(2)
-         .greyscale()
-         .contrast(0.2)
-         .normalize();
+    // Escalar la imagen x2 y ponerla en escala de grises
+    image.scale(2).greyscale();
+    
+    // Calcular la luminancia promedio para detectar si es Dark Mode
+    let totalLum = 0;
+    const width = image.bitmap.width;
+    const height = image.bitmap.height;
+    
+    image.scan(0, 0, width, height, function(x, y, idx) {
+      totalLum += this.bitmap.data[idx + 0];
+    });
+    const avgLum = totalLum / (width * height);
+    
+    // Si la imagen es oscura (ej. Banesco Dark Mode), aplicar filtro adaptativo
+    if (avgLum < 120) {
+      console.log(`[OCR] Detectado Dark Mode (Luminancia: ${avgLum.toFixed(2)}). Aplicando filtro adaptativo...`);
+      image.scan(0, 0, width, height, function(x, y, idx) {
+        const lum = this.bitmap.data[idx + 0];
+        // Medir distancia desde el color de fondo (luminancia promedio)
+        const dist = Math.abs(lum - avgLum);
+        
+        // Convertir fondo a Blanco (255) y textos (blanco o negro) a Negro (0)
+        let new_lum = 255 - (dist * 3.5);
+        if (new_lum < 0) new_lum = 0;
+        if (new_lum > 255) new_lum = 255;
+        
+        this.bitmap.data[idx + 0] = new_lum;
+        this.bitmap.data[idx + 1] = new_lum;
+        this.bitmap.data[idx + 2] = new_lum;
+      });
+    } else {
+      // Light Mode normal (ej. BDV)
+      console.log(`[OCR] Detectado Light Mode (Luminancia: ${avgLum.toFixed(2)}). Aplicando contraste estándar...`);
+      image.contrast(0.2).normalize();
+    }
 
     // Obtener el nuevo buffer procesado
     const processedBuffer = await image.getBufferAsync(Jimp.MIME_JPEG);
