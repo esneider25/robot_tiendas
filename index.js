@@ -386,7 +386,7 @@ async function performOCR(imageBuffer) {
 
     // Expresión regular mejorada para bancos (incluye recibo, comprobante, transaccion)
     // Se cambia a \d{5,25} para EVITAR capturar años (ej. 2024, 2026) que tienen 4 dígitos
-    const keywordRegex = /(?:referencia|ref\.|ref|recibo|comprobante|transaccion|aprobacion|numero\s+de\s+operacion|operacion|tipo\s+de\s+operacion|numero\s+de\s+referencia)[\s\S]{0,35}?(\d{5,25})/gi;
+    const keywordRegex = /(?:referencia|ref\.|ref|recibo|comprobante|transaccion|aprobacion|numero\s+de\s+operacion|operacion|tipo\s+de\s+operacion|numero\s+de\s+referencia|id\s+de\s+orden)[\s\S]{0,35}?(\d{5,25})/gi;
     
     let ocrNumbers = [];
     let match;
