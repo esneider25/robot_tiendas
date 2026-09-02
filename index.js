@@ -812,7 +812,7 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
     
     const screenshotUrl = `https://firebasestorage.googleapis.com/v0/b/accesplay-8bf5d.firebasestorage.app/o/orders_screenshots%2F${orderId}.jpg?alt=media`;
     let attempts = 0;
-    const maxAttempts = 12; // 12 * 5s = 60 segundos (1 minuto de espera máxima)
+    const maxAttempts = order.manualRef ? 3 : 12; // Si puso ref manual, espera máx 15s. Sino 60s.
     
     const pollImage = async () => {
       try {
@@ -1936,41 +1936,31 @@ function startListening() {
       }
     } catch(e) { console.error('Error verificando vault duplicados:', e); }
 
-    // ── Buscar pedido pendiente que coincida ──
+    // ── Buscar pedido que coincida ──
     let matchedOrderId = null;
     if (global.isAutomationEnabled) {
       try {
-        const ordersSnap = await accessPlayApp.database().ref('orders').orderByChild('status').equalTo('pending').once('value');
-      const pendingOrders = ordersSnap.val() || {};
+        // En lugar de buscar solo 'pending', buscamos los últimos 150 pedidos.
+        // Esto evita re-usar una referencia bancaria si el admin ya aprobó el pedido manualmente ANTES de que llegara la notificación.
+        const ordersSnap = await accessPlayApp.database().ref('orders').orderByChild('createdAt').limitToLast(150).once('value');
+        const recentOrders = ordersSnap.val() || {};
 
-      for (const [orderId, order] of Object.entries(pendingOrders)) {
-        // Excluir pagos de billetera/PIN
-        if (order.paymentMethodId === 'wallet' || order.paymentMethodId === 'pin-redemption') continue;
+        for (const [orderId, order] of Object.entries(recentOrders)) {
+          // Excluir pagos de billetera/PIN y pedidos rechazados
+          if (order.paymentMethodId === 'wallet' || order.paymentMethodId === 'pin-redemption' || order.status === 'rejected') continue;
 
-        // Buscar si la referencia bancaria coincide con alguna ref del pedido
-        const orderRefs = [];
-        if (Array.isArray(order.ocrNumbers)) orderRefs.push(...order.ocrNumbers.map(r => String(r).trim()));
-        if (order.manualRef) orderRefs.push(String(order.manualRef).trim());
+          // Buscar si la referencia bancaria coincide con alguna ref del pedido
+          const orderRefs = [];
+          if (Array.isArray(order.ocrNumbers)) orderRefs.push(...order.ocrNumbers.map(r => String(r).trim()));
+          if (order.manualRef) orderRefs.push(String(order.manualRef).trim());
 
-        const refMatches = orderRefs.some(r => isReferenceMatch(r, parsed.ref));
-        if (!refMatches) continue;
+          const refMatches = orderRefs.some(r => isReferenceMatch(r, parsed.ref));
+          if (!refMatches) continue;
 
-        // Verificar monto: pagó al menos el 99% del precio (pagar de más siempre es OK)
-        if (order.priceBs) {
-          const expectedBs = parseFloat(order.priceBs);
-          const minAcceptable = expectedBs * 0.99; // 1% menos permitido
-          if (parsed.amountBs < minAcceptable) {
-            console.log(`⚠️ [AccessPlay] Ref ${parsed.ref} coincide con #${orderId} pero monto insuficiente: Banco=Bs.${parsed.amountBs} vs Mínimo=Bs.${minAcceptable.toFixed(2)}`);
+          // ¡Match encontrado!
+          if (order.status !== 'pending') {
+            console.log(`⚠️ [AccessPlay] Ref ${parsed.ref} coincide con #${orderId} pero ya estaba '${order.status}'. Guardando en vault como USADA.`);
             
-            // AUTO-RECHAZAR el pedido pendiente
-            const orderDbRef = accessPlayApp.database().ref('orders/' + orderId);
-            await orderDbRef.update({ 
-              status: 'rejected', 
-              botProcessed: true,
-              adminNote: `Rechazado auto: Pago insuficiente (Recibido Bs.${parsed.amountBs}, Esperado Bs.${expectedBs})` 
-            });
-
-            // Guardar en vault como "usada"
             await bankVaultRef.push({
               ref: parsed.ref,
               amountBs: parsed.amountBs,
@@ -1978,32 +1968,63 @@ function startListening() {
               name: parsed.name || null,
               phone: parsed.phone || null,
               matchedOrder: orderId,
-              used: true,
+              used: true, // ¡Clave para evitar doble recarga!
               timestamp: Date.now()
             }).catch(console.error);
 
-            // Actualizar el botón de la tarjeta en Telegram a RECHAZADO
-            if (order.telegramMessageId) {
-              const rejectMarkup = {
-                inline_keyboard: [
-                  [{ text: '❌ RECHAZADO (Monto insuficiente)', callback_data: 'ignore' }],
-                  [{ text: '🔍 Abrir Panel Admin', url: accessPlayBotConfig.adminUrl }]
-                ]
-              };
-              await accessPlayBotConfig.bot.editMessageReplyMarkup(rejectMarkup, { chat_id: accessPlayBotConfig.chatId, message_id: order.telegramMessageId }).catch(console.error);
-            }
-            
-            matchedOrderId = 'REJECTED'; // Para que no intente auto-aprobar más abajo ni guardarlo silencioso sin usar
+            matchedOrderId = 'ALREADY_PROCESSED';
             break;
           }
-        }
 
-        matchedOrderId = orderId;
-        break;
+          // Si es pending, verificar monto: pagó al menos el 99% del precio (pagar de más siempre es OK)
+          if (order.priceBs) {
+            const expectedBs = parseFloat(order.priceBs);
+            const minAcceptable = expectedBs * 0.99; // 1% menos permitido
+            if (parsed.amountBs < minAcceptable) {
+              console.log(`⚠️ [AccessPlay] Ref ${parsed.ref} coincide con #${orderId} pero monto insuficiente: Banco=Bs.${parsed.amountBs} vs Mínimo=Bs.${minAcceptable.toFixed(2)}`);
+              
+              // AUTO-RECHAZAR el pedido pendiente
+              const orderDbRef = accessPlayApp.database().ref('orders/' + orderId);
+              await orderDbRef.update({ 
+                status: 'rejected', 
+                botProcessed: true,
+                adminNote: `Rechazado auto: Pago insuficiente (Recibido Bs.${parsed.amountBs}, Esperado Bs.${expectedBs})` 
+              });
+
+              // Guardar en vault como "usada"
+              await bankVaultRef.push({
+                ref: parsed.ref,
+                amountBs: parsed.amountBs,
+                type: parsed.type,
+                name: parsed.name || null,
+                phone: parsed.phone || null,
+                matchedOrder: orderId,
+                used: true,
+                timestamp: Date.now()
+              }).catch(console.error);
+
+              // Actualizar el botón de la tarjeta en Telegram a RECHAZADO
+              if (order.telegramMessageId) {
+                const rejectMarkup = {
+                  inline_keyboard: [
+                    [{ text: '❌ RECHAZADO (Monto insuficiente)', callback_data: 'ignore' }],
+                    [{ text: '🔍 Abrir Panel Admin', url: accessPlayBotConfig.adminUrl }]
+                  ]
+                };
+                await accessPlayBotConfig.bot.editMessageReplyMarkup(rejectMarkup, { chat_id: accessPlayBotConfig.chatId, message_id: order.telegramMessageId }).catch(console.error);
+              }
+              
+              matchedOrderId = 'REJECTED'; // Para que no intente auto-aprobar más abajo ni guardarlo silencioso sin usar
+              break;
+            }
+          }
+
+          matchedOrderId = orderId;
+          break;
+        }
+      } catch(e) {
+        console.error('Error buscando órdenes pendientes para banco:', e);
       }
-    } catch(e) {
-      console.error('Error buscando órdenes pendientes para banco:', e);
-    }
     }
 
     // ── Si encontramos match: AUTO-APROBAR ──
