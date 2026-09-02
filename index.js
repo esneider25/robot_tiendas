@@ -972,7 +972,8 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
     const apiConfigs = apiConfigsSnap.val() || [];
     const apiIdx = parseInt(order.apiProvider);
     
-    if (!isNaN(apiIdx) && apiConfigs[apiIdx] && apiConfigs[apiIdx].enabled) {
+    const apiProductId = parseInt(order.apiProductId);
+    if (!isNaN(apiIdx) && apiConfigs[apiIdx] && apiConfigs[apiIdx].enabled && !isNaN(apiProductId)) {
       console.log(`⚡ [${storeName}] API habilitada. Disparando recarga automática para pedido de monedero #${order.id}`);
       try {
         const apiRes = await processApiTopupFromTelegram(order, appInstance);
@@ -1121,7 +1122,7 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
     ];
   } else {
     if (order.paymentMethodId === 'wallet') {
-      const hasApi = order.apiProvider !== undefined && order.apiProvider !== null && order.apiProvider !== '';
+      const hasApi = order.apiProvider !== undefined && order.apiProvider !== null && order.apiProvider !== '' && order.apiProductId !== undefined && order.apiProductId !== null && order.apiProductId !== '';
       if (hasApi) {
         inline_keyboard = [
            [{ text: '⏳ Auto-Procesando...', callback_data: 'ignore' }],
@@ -1241,7 +1242,7 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
   let adminNote = `Aprobado automáticamente por pago bancario (Ref: ${bankInfo.ref})`;
 
   // ── Despacho de API (igual que el botón Aprobar) ──
-  let hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '';
+  let hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '' && orderData.apiProductId !== undefined && orderData.apiProductId !== null && orderData.apiProductId !== '';
   if (hasApi) {
     // Actualizar Telegram con botón de "procesando" si tiene mensaje
     if (orderData.telegramMessageId) {
@@ -2682,7 +2683,7 @@ Object.keys(bots).forEach(storeName => {
           let adminNote = 'Pedido realizado exitosamente';
 
           // Mostrar botón de cargando mientras procesa la API (solo si tiene apiProvider)
-          const hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '';
+          const hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '' && orderData.apiProductId !== undefined && orderData.apiProductId !== null && orderData.apiProductId !== '';
           if (hasApi) {
             try {
               await botConfig.bot.editMessageReplyMarkup(
