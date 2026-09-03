@@ -674,20 +674,40 @@ function isReferenceMatch(refA, refB) {
   const a = String(refA).trim();
   const b = String(refB).trim();
   if (a === b) return true;
-  if (a.endsWith(b) || b.endsWith(a)) return true;
   
-  // Buscar la subcadena común más larga
-  let maxMatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    for (let j = i + 1; j <= a.length; j++) {
-      const sub = a.substring(i, j);
-      if (b.includes(sub) && sub.length > maxMatch) {
-        maxMatch = sub.length;
+  // Si uno de los dos es un sufijo del otro, PERO tiene al menos 4 dígitos
+  if (a.length >= 4 && b.endsWith(a)) return true;
+  if (b.length >= 4 && a.endsWith(b)) return true;
+
+  // Levenshtein Distance para permitir errores menores de OCR
+  function getEditDistance(s1, s2) {
+    if (s1.length === 0) return s2.length;
+    if (s2.length === 0) return s1.length;
+    let matrix = [];
+    for (let i = 0; i <= s2.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= s1.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= s2.length; i++) {
+      for (let j = 1; j <= s1.length; j++) {
+        if (s2.charAt(i - 1) === s1.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1));
+        }
       }
     }
+    return matrix[s2.length][s1.length];
   }
-  // Permitir match si coinciden al menos 6 números seguidos
-  return maxMatch >= 6;
+
+  // Solo comparar similitud si tienen longitudes parecidas (max 3 de dif)
+  if (Math.abs(a.length - b.length) <= 3) {
+    const distance = getEditDistance(a, b);
+    // Permitir hasta 20% de errores (OCR se equivoca a veces en 1 o 2 números)
+    // Para números de 12 dígitos, maxErrors = 2. Para 4 dígitos, maxErrors = 1.
+    const maxErrors = Math.max(1, Math.floor(Math.max(a.length, b.length) * 0.2));
+    if (distance <= maxErrors) return true;
+  }
+  
+  return false;
 }
 
 const orderQueue = new PromiseQueue(1);
