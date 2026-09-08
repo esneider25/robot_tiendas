@@ -3367,12 +3367,12 @@ async function generateSalesReport(storeName, period) {
   const { startOfRange, endOfRange, label } = getDateRange(period);
   const vetNow = getVETNow();
 
-  // Obtener tasa de cambio
-  let exchangeRate = 1;
+  // Obtener tasa de cambio ACTUAL
+  let currentRate = 1;
   try {
     const rateSnap = await appInstance.database().ref('exchange_rate').once('value');
     const rates = rateSnap.val() || {};
-    exchangeRate = rates.usdToBs || 1;
+    currentRate = rates.usdToBs || 1;
   } catch(e) {}
 
   // Obtener pedidos
@@ -3388,8 +3388,14 @@ async function generateSalesReport(storeName, period) {
   let pendingOrders = 0;
   let totalRevenueUsd = 0;
   let totalCostUsd = 0;
-  let totalRevenueBs = 0;
+  let totalRevenueBs = 0;    // Bs REALES cobrados (con la tasa del momento)
+  let totalCostBs = 0;       // Costos en Bs (usando la tasa real de cada pedido)
   const productBreakdown = {};
+
+  // Tracking de tasas de cambio
+  const ratesUsed = [];       // Array de tasas efectivas usadas
+  let minRate = Infinity;
+  let maxRate = 0;
 
   for (const [orderId, order] of Object.entries(allOrders)) {
     if (!order.createdAt) continue;
@@ -3406,9 +3412,23 @@ async function generateSalesReport(storeName, period) {
       const costUsd = parseFloat(order.costUsd || 0);
       const priceBs = parseFloat(order.priceBs || 0);
 
+      // Calcular la tasa efectiva de ESTE pedido (la que estaba al momento de la venta)
+      let orderRate = currentRate;
+      if (priceBs > 0 && priceUsd > 0) {
+        orderRate = priceBs / priceUsd;
+      }
+
       totalRevenueUsd += priceUsd;
       totalCostUsd += costUsd;
-      totalRevenueBs += priceBs > 0 ? priceBs : (priceUsd * exchangeRate);
+      totalRevenueBs += priceBs > 0 ? priceBs : (priceUsd * currentRate);
+      totalCostBs += costUsd * orderRate; // Costo en Bs usando la tasa del momento de la venta
+
+      // Registrar la tasa usada
+      if (priceUsd > 0) {
+        ratesUsed.push({ rate: orderRate, amountUsd: priceUsd });
+        if (orderRate < minRate) minRate = orderRate;
+        if (orderRate > maxRate) maxRate = orderRate;
+      }
 
       const productKey = order.productName || 'Producto Desconocido';
       if (!productBreakdown[productKey]) {
@@ -3424,9 +3444,22 @@ async function generateSalesReport(storeName, period) {
     }
   }
 
+  // Calcular ganancia REAL en Bs (usando las tasas de cada pedido)
   const profitUsd = totalRevenueUsd - totalCostUsd;
-  const profitBs = profitUsd * exchangeRate;
-  const totalCostBs = totalCostUsd * exchangeRate;
+  const profitBs = totalRevenueBs - totalCostBs;
+
+  // Tasa promedio ponderada (por volumen USD)
+  let weightedAvgRate = currentRate;
+  if (ratesUsed.length > 0) {
+    const totalWeightedRate = ratesUsed.reduce((sum, r) => sum + (r.rate * r.amountUsd), 0);
+    const totalUsd = ratesUsed.reduce((sum, r) => sum + r.amountUsd, 0);
+    weightedAvgRate = totalUsd > 0 ? (totalWeightedRate / totalUsd) : currentRate;
+  }
+
+  // Calcular impacto del cambio de tasa
+  // "¿Cuánto habría ganado si TODO se hubiera vendido a la tasa actual?"
+  const revenueBsAtCurrentRate = totalRevenueUsd * currentRate;
+  const rateImpactBs = totalRevenueBs - revenueBsAtCurrentRate;
 
   // Título según el periodo
   const titleMap = {
@@ -3466,6 +3499,30 @@ async function generateSalesReport(storeName, period) {
   msg += `   🇻🇪 <b>Bs. ${profitBs.toFixed(2)}</b>\n`;
   msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
 
+  // Sección de tasas de cambio
+  if (ratesUsed.length > 0) {
+    msg += `\n💱 <b>Tasas de Cambio:</b>\n`;
+    msg += `   📌 Actual: Bs. ${currentRate}\n`;
+    msg += `   📊 Promedio ponderado: Bs. ${weightedAvgRate.toFixed(2)}\n`;
+    
+    if (minRate !== maxRate && minRate !== Infinity) {
+      msg += `   📉 Mínima: Bs. ${minRate.toFixed(2)}\n`;
+      msg += `   📈 Máxima: Bs. ${maxRate.toFixed(2)}\n`;
+    }
+
+    // Impacto del cambio de tasa
+    if (Math.abs(rateImpactBs) > 0.01) {
+      const impactIcon = rateImpactBs > 0 ? '🟢' : '🔴';
+      const impactSign = rateImpactBs > 0 ? '+' : '';
+      msg += `\n   ${impactIcon} <b>Impacto cambiario:</b> ${impactSign}Bs. ${rateImpactBs.toFixed(2)}\n`;
+      if (rateImpactBs > 0) {
+        msg += `   <i>(Ganaste más Bs porque vendiste antes de que bajara la tasa)</i>\n`;
+      } else {
+        msg += `   <i>(Perdiste Bs porque vendiste con tasa más baja que la actual)</i>\n`;
+      }
+    }
+  }
+
   // Desglose por producto (top 10)
   const sortedProducts = Object.entries(productBreakdown)
     .sort((a, b) => b[1].revenue - a[1].revenue)
@@ -3480,7 +3537,6 @@ async function generateSalesReport(storeName, period) {
   }
 
   msg += `\n⏰ ${vetNow.toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' })} VET`;
-  msg += `\n💱 Tasa: $1 = Bs. ${exchangeRate}`;
 
   return msg;
 }
