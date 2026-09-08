@@ -2293,6 +2293,35 @@ Object.keys(bots).forEach(storeName => {
       }
     }
 
+    // ── COMANDO /resumen ──
+    if (msg.text && msg.text.startsWith('/resumen')) {
+      const chatId = msg.chat.id;
+      if (chatId.toString() !== botConfig.chatId.toString()) return; // Solo admin
+
+      const parts = msg.text.trim().toLowerCase().split(/\s+/);
+      const arg = parts[1] || '';
+
+      let period = 'hoy';
+      if (arg === 'ayer') period = 'ayer';
+      else if (arg === 'semanal' || arg === 'semana') period = 'semanal';
+      else if (arg === 'mensual' || arg === 'mes') period = 'mensual';
+
+      const periodLabels = { hoy: 'del día', ayer: 'de ayer', semanal: 'semanal', mensual: 'mensual' };
+      await botConfig.bot.sendMessage(chatId, `⏳ Generando resumen ${periodLabels[period]}...`);
+
+      try {
+        const msg = await generateSalesReport(storeName, period);
+        if (msg) {
+          await botConfig.bot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
+        } else {
+          await botConfig.bot.sendMessage(chatId, '❌ No se pudo generar el resumen para esta tienda.');
+        }
+      } catch (e) {
+        await botConfig.bot.sendMessage(chatId, `❌ Error generando resumen: ${e.message}`);
+      }
+      return;
+    }
+
     if (msg.text && (msg.text === '/reparar_torneos' || msg.text === 'reparar_torneos')) {
       const chatId = msg.chat.id;
       if (chatId.toString() !== botConfig.chatId.toString()) return; // Solo admin
@@ -3266,6 +3295,244 @@ async function repairFrozenButtons() {
   }
 }
 
+// ========================================
+// 12. RESUMEN DE VENTAS (Automático + Comando /resumen)
+// ========================================
+
+// Utilidad: obtener la fecha actual en hora Venezuela (UTC-4)
+function getVETNow() {
+  const now = new Date();
+  const vetOffset = -4 * 60;
+  return new Date(now.getTime() + (vetOffset - now.getTimezoneOffset()) * 60000);
+}
+
+// Utilidad: calcular rangos de fecha en hora Venezuela
+function getDateRange(period) {
+  const vetNow = getVETNow();
+  const todayStr = vetNow.toISOString().split('T')[0];
+  
+  let startOfRange, endOfRange, label;
+  
+  switch (period) {
+    case 'ayer': {
+      const ayer = new Date(vetNow);
+      ayer.setDate(ayer.getDate() - 1);
+      const ayerStr = ayer.toISOString().split('T')[0];
+      startOfRange = new Date(ayerStr + 'T00:00:00-04:00').getTime();
+      endOfRange = new Date(ayerStr + 'T23:59:59-04:00').getTime();
+      label = ayer.toLocaleDateString('es-VE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+      break;
+    }
+    case 'semanal': {
+      // Últimos 7 días (incluyendo hoy)
+      const hace7 = new Date(vetNow);
+      hace7.setDate(hace7.getDate() - 6);
+      const hace7Str = hace7.toISOString().split('T')[0];
+      startOfRange = new Date(hace7Str + 'T00:00:00-04:00').getTime();
+      endOfRange = new Date(todayStr + 'T23:59:59-04:00').getTime();
+      const inicioLabel = hace7.toLocaleDateString('es-VE', { day: 'numeric', month: 'short' });
+      const finLabel = vetNow.toLocaleDateString('es-VE', { day: 'numeric', month: 'short', year: 'numeric' });
+      label = `${inicioLabel} al ${finLabel} (7 días)`;
+      break;
+    }
+    case 'mensual': {
+      // Desde el día 1 del mes actual hasta hoy
+      const inicioMes = new Date(vetNow.getFullYear(), vetNow.getMonth(), 1);
+      const inicioMesStr = inicioMes.toISOString().split('T')[0];
+      startOfRange = new Date(inicioMesStr + 'T00:00:00-04:00').getTime();
+      endOfRange = new Date(todayStr + 'T23:59:59-04:00').getTime();
+      const mesNombre = vetNow.toLocaleDateString('es-VE', { month: 'long', year: 'numeric' });
+      const diasTranscurridos = vetNow.getDate();
+      label = `${mesNombre} (${diasTranscurridos} días)`;
+      break;
+    }
+    default: { // 'hoy'
+      startOfRange = new Date(todayStr + 'T00:00:00-04:00').getTime();
+      endOfRange = new Date(todayStr + 'T23:59:59-04:00').getTime();
+      label = vetNow.toLocaleDateString('es-VE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+      break;
+    }
+  }
+  
+  return { startOfRange, endOfRange, label };
+}
+
+// Función principal: generar reporte de ventas para una tienda y rango de fechas
+async function generateSalesReport(storeName, period) {
+  const appInstance = storeApps[storeName];
+  const botConfig = bots[storeName];
+
+  if (!appInstance || !botConfig) return null;
+
+  const { startOfRange, endOfRange, label } = getDateRange(period);
+  const vetNow = getVETNow();
+
+  // Obtener tasa de cambio
+  let exchangeRate = 1;
+  try {
+    const rateSnap = await appInstance.database().ref('exchange_rate').once('value');
+    const rates = rateSnap.val() || {};
+    exchangeRate = rates.usdToBs || 1;
+  } catch(e) {}
+
+  // Obtener pedidos
+  const ordersSnap = await appInstance.database().ref('orders')
+    .orderByChild('createdAt')
+    .once('value');
+  
+  const allOrders = ordersSnap.val() || {};
+
+  let totalOrders = 0;
+  let completedOrders = 0;
+  let rejectedOrders = 0;
+  let pendingOrders = 0;
+  let totalRevenueUsd = 0;
+  let totalCostUsd = 0;
+  let totalRevenueBs = 0;
+  const productBreakdown = {};
+
+  for (const [orderId, order] of Object.entries(allOrders)) {
+    if (!order.createdAt) continue;
+
+    const orderTime = new Date(order.createdAt).getTime();
+    if (isNaN(orderTime) || orderTime < startOfRange || orderTime > endOfRange) continue;
+    if (order.productType === 'wallet-recharge') continue;
+
+    totalOrders++;
+
+    if (order.status === 'completed') {
+      completedOrders++;
+      const priceUsd = parseFloat(order.priceUsd || 0);
+      const costUsd = parseFloat(order.costUsd || 0);
+      const priceBs = parseFloat(order.priceBs || 0);
+
+      totalRevenueUsd += priceUsd;
+      totalCostUsd += costUsd;
+      totalRevenueBs += priceBs > 0 ? priceBs : (priceUsd * exchangeRate);
+
+      const productKey = order.productName || 'Producto Desconocido';
+      if (!productBreakdown[productKey]) {
+        productBreakdown[productKey] = { count: 0, revenue: 0, cost: 0 };
+      }
+      productBreakdown[productKey].count++;
+      productBreakdown[productKey].revenue += priceUsd;
+      productBreakdown[productKey].cost += costUsd;
+    } else if (order.status === 'rejected') {
+      rejectedOrders++;
+    } else {
+      pendingOrders++;
+    }
+  }
+
+  const profitUsd = totalRevenueUsd - totalCostUsd;
+  const profitBs = profitUsd * exchangeRate;
+  const totalCostBs = totalCostUsd * exchangeRate;
+
+  // Título según el periodo
+  const titleMap = {
+    'hoy': 'RESUMEN DEL DÍA',
+    'ayer': 'RESUMEN DE AYER',
+    'semanal': 'RESUMEN SEMANAL',
+    'mensual': 'RESUMEN MENSUAL'
+  };
+  const title = titleMap[period] || 'RESUMEN DE VENTAS';
+  const pedidosLabel = period === 'hoy' || period === 'ayer' ? 'Pedidos del día' : 'Pedidos del período';
+
+  // Construir mensaje
+  let msg = `📊 <b>${title}</b>\n`;
+  msg += `${botConfig.emoji} <b>${storeName.toUpperCase()}</b>\n`;
+  msg += `📅 ${label}\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  msg += `📦 <b>${pedidosLabel}:</b> ${totalOrders}\n`;
+  msg += `   ✅ Completados: ${completedOrders}\n`;
+  msg += `   ❌ Rechazados: ${rejectedOrders}\n`;
+  if (pendingOrders > 0) {
+    msg += `   ⏳ Pendientes: ${pendingOrders}\n`;
+  }
+  msg += `\n`;
+
+  msg += `💰 <b>Ventas Totales:</b>\n`;
+  msg += `   💵 $${totalRevenueUsd.toFixed(2)} USD\n`;
+  msg += `   🇻🇪 Bs. ${totalRevenueBs.toFixed(2)}\n\n`;
+
+  msg += `📉 <b>Costos (Proveedor):</b>\n`;
+  msg += `   💵 $${totalCostUsd.toFixed(2)} USD\n`;
+  msg += `   🇻🇪 Bs. ${totalCostBs.toFixed(2)}\n\n`;
+
+  msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+  msg += `🏆 <b>GANANCIA NETA:</b>\n`;
+  msg += `   💵 <b>$${profitUsd.toFixed(2)} USD</b>\n`;
+  msg += `   🇻🇪 <b>Bs. ${profitBs.toFixed(2)}</b>\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+
+  // Desglose por producto (top 10)
+  const sortedProducts = Object.entries(productBreakdown)
+    .sort((a, b) => b[1].revenue - a[1].revenue)
+    .slice(0, 10);
+
+  if (sortedProducts.length > 0) {
+    msg += `\n📋 <b>Desglose por Producto:</b>\n`;
+    for (const [name, data] of sortedProducts) {
+      const productProfit = data.revenue - data.cost;
+      msg += `   • ${name}: x${data.count} → $${data.revenue.toFixed(2)} (Ganancia: $${productProfit.toFixed(2)})\n`;
+    }
+  }
+
+  msg += `\n⏰ ${vetNow.toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' })} VET`;
+  msg += `\n💱 Tasa: $1 = Bs. ${exchangeRate}`;
+
+  return msg;
+}
+
+// Enviar resumen automático del día a TODAS las tiendas (para el cron de 11:59 PM)
+async function sendDailySummary() {
+  console.log('\n📊 [Resumen Diario] Generando resumen de ventas del día...');
+
+  const storeNames = ['AccessPlay', 'CandyStore', 'RecargaShark'];
+
+  for (const storeName of storeNames) {
+    try {
+      const msg = await generateSalesReport(storeName, 'hoy');
+      if (msg) {
+        await bots[storeName].bot.sendMessage(bots[storeName].chatId, msg, { parse_mode: 'HTML' });
+        console.log(`📊 [Resumen Diario] Resumen enviado a ${storeName}.`);
+      }
+    } catch (e) {
+      console.error(`❌ [Resumen Diario] Error generando resumen para ${storeName}:`, e.message);
+    }
+  }
+}
+
+// Programar el resumen diario a las 11:59 PM hora Venezuela (UTC-4)
+function scheduleDailySummary() {
+  const now = new Date();
+  
+  const vetOffset = -4;
+  const targetHour = 23;
+  const targetMinute = 59;
+  
+  let target = new Date(now);
+  target.setUTCHours(targetHour - vetOffset, targetMinute, 0, 0);
+  
+  if (target.getTime() <= now.getTime()) {
+    target.setDate(target.getDate() + 1);
+  }
+  
+  const msUntilTarget = target.getTime() - now.getTime();
+  const hoursUntil = (msUntilTarget / (1000 * 60 * 60)).toFixed(1);
+  
+  console.log(`📊 Resumen diario programado para las 11:59 PM VET (en ${hoursUntil} horas).`);
+  
+  setTimeout(() => {
+    sendDailySummary().catch(console.error);
+    
+    setInterval(() => {
+      sendDailySummary().catch(console.error);
+    }, 24 * 60 * 60 * 1000);
+  }, msUntilTarget);
+}
+
 // Iniciar el sistema:
 // 1. Borrar webhooks (para asegurarse de que el polling funcione)
 // 2. Limpiar pedidos maliciosos (XSS)
@@ -3325,4 +3592,7 @@ async function repairFrozenButtons() {
   }, 60 * 60 * 1000); // Cada 1 hora
 
   console.log('🧹 Limpieza periódica del baúl bancario programada (cada 1 hora).');
+
+  // ── Resumen diario de ventas (11:59 PM VET) ──
+  scheduleDailySummary();
 })();
