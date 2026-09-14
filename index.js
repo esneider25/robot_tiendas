@@ -1292,7 +1292,13 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
 
   // ── Despacho de API (igual que el botón Aprobar) ──
   let hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '' && orderData.apiProductId !== undefined && orderData.apiProductId !== null && orderData.apiProductId !== '';
-  if (hasApi) {
+  
+  if (orderData.productType === 'wallet-recharge') {
+    // Las recargas de monedero no necesitan API, se completan automáticamente
+    newStatus = 'completed';
+    buttonText = '✅ AUTO-APROBADO (Monedero)';
+    adminNote = `Pago verificado (Ref: ${bankInfo.ref}). Recarga de monedero automática.`;
+  } else if (hasApi) {
     // Actualizar Telegram con botón de "procesando" si tiene mensaje
     if (orderData.telegramMessageId) {
       try {
@@ -1818,18 +1824,28 @@ function startListening() {
              console.log(`🔄 [${store.name}] Rectificación detectada para #${orderId}. Re-intentando API...`);
              try {
                  const apiRes = await processApiTopupFromTelegram(orderData, store.app);
-                 orderData.status = apiRes.status;
-                 orderData.adminNote = apiRes.dbNote;
+                 
+                 let newStatus = apiRes.status;
+                 let newAdminNote = apiRes.dbNote;
+                 
+                 if (newStatus === 'no-api') {
+                     // Es un producto manual sin API. Debe ir a processing para entrega manual.
+                     newStatus = 'processing';
+                     newAdminNote = 'Cliente rectificó datos. Requiere entrega manual.';
+                 }
+
+                 orderData.status = newStatus;
+                 orderData.adminNote = newAdminNote;
                  
                  const newHistory = [...history, {
-                     status: apiRes.status,
+                     status: newStatus,
                      timestamp: new Date().toISOString(),
-                     note: apiRes.dbNote
+                     note: newAdminNote
                  }];
                  
                  await ref.child(orderId).update({
-                     status: apiRes.status,
-                     adminNote: apiRes.dbNote,
+                     status: newStatus,
+                     adminNote: newAdminNote,
                      updatedAt: new Date().toISOString(),
                      statusHistory: newHistory
                  });
@@ -3102,6 +3118,9 @@ const activePolls = new Set();
 async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId, messageId) {
   if (activePolls.has(orderId)) return;
   
+  // Si no tiene ID de producto API válido, es un producto manual, no hacer polling
+  if (orderData.apiProductId === undefined || orderData.apiProductId === null || orderData.apiProductId === '') return;
+
   const apiConfigsSnap = await appInstance.database().ref('api_configs').once('value');
   const apiConfigs = apiConfigsSnap.val() || [];
   const apiIdx = parseInt(orderData.apiProvider);
