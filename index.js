@@ -1356,8 +1356,12 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
   // ── Actualizar botones de Telegram ──
   if (orderData.telegramMessageId) {
     const finalMarkup = {
-      inline_keyboard: [
-        [{ text: buttonText, callback_data: hasApi ? 'noop' : `approve_${orderId}` }],
+      inline_keyboard: hasApi || orderData.productType === 'wallet-recharge' ? [
+        [{ text: buttonText, callback_data: 'noop' }],
+        [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
+      ] : [
+        [{ text: buttonText, callback_data: `approve_${orderId}` }],
+        [{ text: '❌ Rechazar', callback_data: `reject_${orderId}` }],
         [{ text: '🔍 Abrir Panel Admin', url: botConfig.adminUrl }]
       ]
     };
