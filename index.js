@@ -3612,6 +3612,115 @@ function scheduleDailySummary() {
   }, msUntilTarget);
 }
 
+// ========================================
+// SERVIDOR HTTP — Proxy relay para APIs con whitelist de IP
+// ========================================
+// Este servidor permite que Vercel reenvíe solicitudes a APIs externas
+// que requieren IP fija/whitelistada, usando la IP de Render como intermediario.
+const http = require('http');
+
+const PROXY_SECRET = process.env.PROXY_SECRET || '';
+const HTTP_PORT = process.env.PORT || 10000;
+
+const proxyServer = http.createServer(async (req, res) => {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Proxy-Secret');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  // Health check endpoint (para que Render no duerma el servicio)
+  if (req.url === '/health' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', timestamp: Date.now() }));
+    return;
+  }
+
+  // Proxy forward endpoint
+  if (req.url === '/api/proxy-forward' && req.method === 'POST') {
+    // Validar secreto compartido
+    const secret = req.headers['x-proxy-secret'] || '';
+    if (!PROXY_SECRET || secret !== PROXY_SECRET) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Acceso denegado: secreto inválido' }));
+      return;
+    }
+
+    // Leer el body
+    let bodyStr = '';
+    req.on('data', chunk => bodyStr += chunk);
+    req.on('end', async () => {
+      try {
+        const body = JSON.parse(bodyStr);
+        const { url: targetUrl, method: targetMethod, headers: targetHeaders, body: targetBody } = body;
+
+        if (!targetUrl) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Falta la URL destino' }));
+          return;
+        }
+
+        const parsedUrl = new URL(targetUrl);
+        const options = {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: targetMethod || 'GET',
+          headers: targetHeaders || { 'Content-Type': 'application/json' },
+          timeout: 20000
+        };
+
+        const protocol = parsedUrl.protocol === 'https:' ? https : http;
+
+        const proxyReq = protocol.request(options, (proxyRes) => {
+          let dataStr = '';
+          proxyRes.on('data', chunk => dataStr += chunk);
+          proxyRes.on('end', () => {
+            res.writeHead(proxyRes.statusCode, { 'Content-Type': 'application/json' });
+            res.end(dataStr);
+          });
+        });
+
+        proxyReq.on('timeout', () => {
+          proxyReq.destroy();
+          res.writeHead(504, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Timeout: la API externa tardó demasiado' }));
+        });
+
+        proxyReq.on('error', (e) => {
+          console.error('❌ [ProxyForward] Error:', e.message);
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Error de conexión: ${e.message}` }));
+        });
+
+        if ((targetMethod === 'POST' || targetMethod === 'PUT') && targetBody) {
+          proxyReq.write(typeof targetBody === 'string' ? targetBody : JSON.stringify(targetBody));
+        }
+
+        proxyReq.end();
+      } catch (e) {
+        console.error('❌ [ProxyForward] Parse error:', e.message);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Error parseando solicitud: ${e.message}` }));
+      }
+    });
+    return;
+  }
+
+  // Ruta no encontrada
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Ruta no encontrada' }));
+});
+
+proxyServer.listen(HTTP_PORT, '0.0.0.0', () => {
+  console.log(`🌐 Servidor HTTP proxy escuchando en puerto ${HTTP_PORT} (0.0.0.0)`);
+});
+
 // Iniciar el sistema:
 // 1. Borrar webhooks (para asegurarse de que el polling funcione)
 // 2. Limpiar pedidos maliciosos (XSS)
