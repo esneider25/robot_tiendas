@@ -3646,8 +3646,9 @@ const proxyServer = http.createServer(async (req, res) => {
     // Validar secreto compartido
     const secret = req.headers['x-proxy-secret'] || '';
     if (!PROXY_SECRET || secret !== PROXY_SECRET) {
+      console.error(`❌ [ProxyForward] Secreto inválido. Recibido: '${secret}', Esperado: '${PROXY_SECRET}'`);
       res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Acceso denegado: secreto inválido' }));
+      res.end(JSON.stringify({ error: 'Acceso denegado: secreto invalido' }));
       return;
     }
 
