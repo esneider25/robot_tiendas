@@ -3717,9 +3717,17 @@ const proxyServer = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'Ruta no encontrada' }));
 });
 
-proxyServer.listen(HTTP_PORT, '0.0.0.0', () => {
-  console.log(`🌐 Servidor HTTP proxy escuchando en puerto ${HTTP_PORT} (0.0.0.0)`);
-});
+console.log(`[DEBUG] Intentando iniciar servidor HTTP... process.env.PORT = ${process.env.PORT}`);
+try {
+  proxyServer.listen(HTTP_PORT, '0.0.0.0', () => {
+    console.log(`🌐 Servidor HTTP proxy escuchando en puerto ${HTTP_PORT} (0.0.0.0)`);
+  }).on('error', (err) => {
+    console.error(`❌ [DEBUG] ERROR EN LISTEN:`, err);
+  });
+} catch (e) {
+  console.error(`❌ [DEBUG] CATCH ERROR EN LISTEN:`, e);
+}
+console.log(`[DEBUG] Llamada a listen() completada. `);
 
 // Iniciar el sistema:
 // 1. Borrar webhooks (para asegurarse de que el polling funcione)
