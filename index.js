@@ -2437,6 +2437,10 @@ Object.keys(bots).forEach(storeName => {
     }
   });
 
+  botConfig.bot.on('polling_error', (error) => {
+    console.error(`[${storeName}] ⚠️ Polling error detectado:`, error.message);
+  });
+
   botConfig.bot.on('callback_query', async (query) => {
     console.log(`[${storeName}] ➡️ Recibido callback_query:`, query.data);
 
