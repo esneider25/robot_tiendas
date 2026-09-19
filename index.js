@@ -70,31 +70,19 @@ console.log('✅ Bases de datos conectadas.');
 // ========================================
 const bots = {
   CandyStore: {
-    bot: new TelegramBot(process.env.CANDYSTORE_BOT_TOKEN, { 
-      polling: {
-        params: { allowed_updates: ['message', 'callback_query'] }
-      }
-    }),
+    bot: new TelegramBot(process.env.CANDYSTORE_BOT_TOKEN, { polling: false }),
     chatId: process.env.CANDYSTORE_CHAT_ID,
     emoji: '🍬',
     adminUrl: 'https://candystore-zeta.vercel.app/admin'
   },
   RecargaShark: {
-    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { 
-      polling: {
-        params: { allowed_updates: ['message', 'callback_query'] }
-      }
-    }),
+    bot: new TelegramBot(process.env.RECARGASHARK_BOT_TOKEN || '8515103558:AAFMRrUiYRna3PbEbZogrIA-i7vIls0clbY', { polling: false }),
     chatId: process.env.RECARGASHARK_CHAT_ID || '6012452103',
     emoji: '🦈',
     adminUrl: 'https://admin.recargashark.com/admin'
   },
   AccessPlay: {
-    bot: new TelegramBot(process.env.ACCESSPLAY_BOT_TOKEN, { 
-      polling: {
-        params: { allowed_updates: ['message', 'callback_query'] }
-      }
-    }),
+    bot: new TelegramBot(process.env.ACCESSPLAY_BOT_TOKEN, { polling: false }),
     chatId: process.env.ACCESSPLAY_CHAT_ID,
     emoji: '🎮',
     adminUrl: 'https://www.accesplay.com/admin'
@@ -3743,6 +3731,19 @@ console.log(`[DEBUG] Llamada a listen() completada. `);
 (async () => {
   await clearAllWebhooks();
   await cleanupMaliciousOrders();
+
+  // ── INICIAR POLLING DESPUÉS de limpiar webhooks ──
+  // Esperar 5 segundos para que la instancia anterior de Render muera
+  // y evitar el error 409 Conflict que congela los botones.
+  console.log('⏳ Esperando 5 segundos antes de iniciar polling (evitar conflicto 409)...');
+  await new Promise(r => setTimeout(r, 5000));
+
+  for (const [storeName, botConfig] of Object.entries(bots)) {
+    botConfig.bot.startPolling({ restart: true, params: { allowed_updates: ['message', 'callback_query'] } });
+    console.log(`✅ [${storeName}] Polling iniciado correctamente.`);
+  }
+  console.log('✅ Todos los bots están escuchando callback_query (botones).\n');
+
   await repairFrozenButtons();
   startListening();
 
