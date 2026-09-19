@@ -2108,6 +2108,16 @@ const telegramLocks = new Set(); // Candado anti doble-clic en Telegram
 
 Object.keys(bots).forEach(storeName => {
   const botConfig = bots[storeName];
+
+  // ================= DEBUG MASTER =================
+  botConfig.bot.on('message', (msg) => {
+    console.log(`[DEBUG-MASTER] [${storeName}] 📩 Mensaje recibido de ${msg.chat.id}: ${msg.text || 'Sin texto'}`);
+  });
+  botConfig.bot.on('callback_query', (query) => {
+    console.log(`[DEBUG-MASTER] [${storeName}] 👆 CLICK EN BOTÓN RECIBIDO: ${query.data}`);
+  });
+  // ================================================
+
   botConfig.bot.on('message', async (msg) => {
     // --- LÓGICA DE RECHAZO PERSONALIZADO (ForceReply) ---
     if (msg.reply_to_message && msg.reply_to_message.text && msg.text) {
@@ -3739,7 +3749,7 @@ console.log(`[DEBUG] Llamada a listen() completada. `);
   await new Promise(r => setTimeout(r, 5000));
 
   for (const [storeName, botConfig] of Object.entries(bots)) {
-    botConfig.bot.startPolling({ restart: true, params: { allowed_updates: ['message', 'callback_query'] } });
+    botConfig.bot.startPolling();
     console.log(`✅ [${storeName}] Polling iniciado correctamente.`);
   }
   console.log('✅ Todos los bots están escuchando callback_query (botones).\n');
