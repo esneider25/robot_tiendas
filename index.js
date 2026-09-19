@@ -3739,6 +3739,42 @@ console.log(`[DEBUG] Llamada a listen() completada. `);
 // 4. Iniciar los listeners en tiempo real
 // 5. Iniciar limpieza periódica del baúl bancario
 (async () => {
+  // === DIAGNÓSTICO EXTREMO DE TELEGRAM ===
+  try {
+    console.log('\n🕵️‍♂️ [DIAGNÓSTICO] Ejecutando escaneo profundo de la API de Telegram para AccessPlay...');
+    const https = require('https');
+    
+    // 1. Verificar Webhook
+    await new Promise((resolve) => {
+      https.get('https://api.telegram.org/bot' + process.env.ACCESSPLAY_BOT_TOKEN + '/getWebhookInfo', res => {
+        let d = ''; res.on('data', c => d += c);
+        res.on('end', () => {
+          console.log('🕵️‍♂️ [DIAGNÓSTICO] WEBHOOK INFO:', d);
+          resolve();
+        });
+      }).on('error', e => { console.error('Error diagnóstico webhook:', e); resolve(); });
+    });
+
+    // 2. Verificar getUpdates puro (sin librería)
+    await new Promise((resolve) => {
+      https.get('https://api.telegram.org/bot' + process.env.ACCESSPLAY_BOT_TOKEN + '/getUpdates?limit=1', res => {
+        let d = ''; res.on('data', c => d += c);
+        res.on('end', () => {
+          console.log('🕵️‍♂️ [DIAGNÓSTICO] GET_UPDATES (RAW):', d);
+          resolve();
+        });
+      }).on('error', e => { console.error('Error diagnóstico getUpdates:', e); resolve(); });
+    });
+    
+    // 3. Imprimir explícitamente qué token se está usando (ocultando una parte por seguridad)
+    const token = process.env.ACCESSPLAY_BOT_TOKEN || '';
+    console.log(`🕵️‍♂️ [DIAGNÓSTICO] Token AccessPlay usado: ${token.substring(0, 10)}...${token.substring(token.length - 5)} (Longitud: ${token.length})`);
+    
+  } catch(e) {
+    console.log('Error en diagnóstico', e);
+  }
+  // ========================================
+
   await clearAllWebhooks();
   await cleanupMaliciousOrders();
 
