@@ -320,14 +320,22 @@ async function getImageBuffer(screenshotStr) {
   // Si es una URL HTTP normal
   if (screenshotStr.startsWith('http')) {
     return new Promise((resolve, reject) => {
-      https.get(screenshotStr, (response) => {
-        if (response.statusCode !== 200) {
-          return reject(new Error('Falló la descarga de la imagen. Status: ' + response.statusCode));
-        }
-        const data = [];
-        response.on('data', (chunk) => data.push(chunk));
-        response.on('end', () => resolve(Buffer.concat(data)));
-      }).on('error', reject);
+      const download = (url) => {
+        const protocol = url.startsWith('https') ? require('https') : require('http');
+        protocol.get(url, (response) => {
+          // Seguir redirecciones (301, 302, 303, 307, 308)
+          if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+            return download(response.headers.location);
+          }
+          if (response.statusCode !== 200) {
+            return reject(new Error('Falló la descarga de la imagen. Status: ' + response.statusCode));
+          }
+          const data = [];
+          response.on('data', (chunk) => data.push(chunk));
+          response.on('end', () => resolve(Buffer.concat(data)));
+        }).on('error', reject);
+      };
+      download(screenshotStr);
     });
   }
 
