@@ -3597,16 +3597,20 @@ async function sendDailySummary() {
 function scheduleDailySummary() {
   const now = new Date();
   
-  const vetOffset = -4;
-  const targetHour = 23;
-  const targetMinute = 59;
+  // Convertimos 'now' (UTC) a hora VET (restando 4 horas)
+  const vetTime = new Date(now.getTime() - (4 * 60 * 60 * 1000));
   
-  let target = new Date(now);
-  target.setUTCHours(targetHour - vetOffset, targetMinute, 0, 0);
+  // Creamos el target basado en el día actual en VET
+  let targetVet = new Date(vetTime);
+  targetVet.setUTCHours(23, 59, 0, 0); // Usamos setUTCHours para setear 11:59 pero interpretado como VET
   
-  if (target.getTime() <= now.getTime()) {
-    target.setDate(target.getDate() + 1);
+  // Si las 11:59 PM VET de hoy ya pasaron, lo programamos para mañana
+  if (targetVet.getTime() <= vetTime.getTime()) {
+    targetVet.setDate(targetVet.getDate() + 1);
   }
+  
+  // Convertimos el targetVet de vuelta a UTC sumando 4 horas
+  const target = new Date(targetVet.getTime() + (4 * 60 * 60 * 1000));
   
   const msUntilTarget = target.getTime() - now.getTime();
   const hoursUntil = (msUntilTarget / (1000 * 60 * 60)).toFixed(1);
