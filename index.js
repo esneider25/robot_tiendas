@@ -715,6 +715,18 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
 
   if (!order || order.botProcessed) return;
 
+  // 🎰 RULETA: Si es premio completado (ya procesado), solo notificar y saltar
+  // Si está pending, dejarlo pasar para que processApiTopupFromTelegram haga la recarga al juego
+  if (order.type === 'roulette_prize' && order.status === 'completed') {
+    if (storeName === 'AccessPlay' && eventType === 'child_added') {
+      await notifyRouletteWinner(order, appInstance).catch(e =>
+        console.error(`❌ [${storeName}] Error notificando ganador de ruleta #${orderId}:`, e)
+      );
+    }
+    await dbRef.update({ botProcessed: true });
+    return;
+  }
+
   // 🛡️ FILTRO ANTI-XSS: Detectar y eliminar pedidos con payloads maliciosos
   if (/xss/i.test(orderId) || isSuspiciousOrder(order)) {
     console.log(`🚨 [Seguridad] Pedido MALICIOSO detectado: #${orderId}. Eliminando de la base de datos...`);
@@ -744,13 +756,18 @@ async function processNewOrder(orderId, storeName, appInstance, eventType) {
     return;
   }
 
-  // Si pagó con monedero o saldo, o si ya fue procesado automáticamente (status no es pending), lo procesamos INMEDIATAMENTE
-  const isWallet = order.paymentMethodId === 'wallet' || order.paymentMethodId === 'pin-redemption' || (order.paymentMethodName && order.paymentMethodName.toLowerCase().includes('monedero'));
+  // Si pagó con monedero, PIN o RULETA → procesamiento automático sin foto
+  const isWallet = order.paymentMethodId === 'wallet'
+    || order.paymentMethodId === 'pin-redemption'
+    || order.paymentMethodId === 'roulette'   // 🎰 Premio ruleta → recarga directa al juego
+    || (order.paymentMethodName && order.paymentMethodName.toLowerCase().includes('monedero'));
   const isAlreadyProcessed = order.status !== 'pending';
 
   if (isWallet || isAlreadyProcessed) {
     if (pendingOrderIds.has(orderId)) pendingOrderIds.delete(orderId);
-    if (isWallet) {
+    if (order.paymentMethodId === 'roulette') {
+      console.log(`🎰 [${storeName}] Pedido RULETA #${orderId} — despachando recarga automática al juego (gameId: ${order.gameId}).`);
+    } else if (isWallet) {
       console.log(`⚡ [${storeName}] Pedido #${orderId} pagado con Monedero/PIN. Añadiendo a la cola sin foto.`);
     } else {
       console.log(`⏩ [${storeName}] Pedido #${orderId} ya estaba en estado '${order.status}'. Añadiendo a la cola sin foto.`);
@@ -1010,9 +1027,12 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
     }
   }
 
-  // AUTO-API PARA PAGOS CON MONEDERO (Si la API está encendida)
+  // AUTO-API PARA PAGOS CON MONEDERO Y RULETA (Si la API está encendida)
   const appInstance = storeApps[storeName];
-  if ((order.paymentMethodId === 'wallet' || order.paymentMethodId === 'pin-redemption') && order.status === 'pending') {
+  const isAutoPayment = order.paymentMethodId === 'wallet'
+    || order.paymentMethodId === 'pin-redemption'
+    || order.paymentMethodId === 'roulette';  // 🎰 Premio ruleta → recarga directa
+  if (isAutoPayment && order.status === 'pending') {
     const apiConfigsSnap = await appInstance.database().ref('api_configs').once('value');
     const apiConfigs = apiConfigsSnap.val() || [];
     const apiIdx = parseInt(order.apiProvider);
@@ -1096,6 +1116,15 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
   if (order.status === 'processing' && order.paymentMethodId === 'wallet') {
       console.log(`[${storeName}] Pedido #${order.id} de monedero quedó PROCESANDO. Iniciando Polling automático.`);
       pollApiStatus(order.id, order, appInstance, storeName, bots[storeName].chatId, null).catch(console.error);
+  }
+
+  // 🎰 Si es un pedido de RULETA: notificar al Telegram en lugar del flujo normal de comprobante
+  if (order.paymentMethodId === 'roulette') {
+    await notifyRouletteWinner(order, appInstance).catch(e =>
+      console.error(`[${storeName}] Error enviando notificación de ruleta:`, e)
+    );
+    await dbRef.update({ botProcessed: true });
+    return; // No enviar el mensaje normal de "NUEVO PEDIDO"
   }
 }
 
@@ -1260,6 +1289,64 @@ async function sendTelegramNotification(order, storeName, ocrResult, imageBuffer
  * @param {object} bankInfo   - Info del pago bancario { ref, amountBs, type, name, phone }
  * @returns {Promise<boolean>} true si se procesó, false si ya no era pending
  */
+// ========================================
+// 6.4 NOTIFICACIÓN GANADOR DE RULETA
+// ========================================
+
+/**
+ * Envía un mensaje a Telegram cuando un usuario gana la ruleta.
+ * El bot lo notifica usando el bot propio de AccessPlay.
+ * Los diamantes ya fueron acreditados automáticamente por el API de Vercel.
+ */
+async function notifyRouletteWinner(order, appInstance) {
+  const botConfig = bots['AccessPlay'];
+  if (!botConfig || !botConfig.chatId) return;
+
+  // Intentar obtener más datos del usuario desde Firebase
+  let userEmail = order.customerContact || 'N/A';
+  let userName = order.userName || order.playerName || 'N/A';
+  let gameId = order.gameId || 'N/A';
+
+  if (order.userId) {
+    try {
+      const userSnap = await appInstance.database().ref('users/' + order.userId).once('value');
+      const userData = userSnap.val();
+      if (userData) {
+        userEmail = userData.email || userEmail;
+        userName = userData.displayName || userData.name || userName;
+      }
+    } catch (e) { /* silenciar */ }
+  }
+
+  const prizeDiamonds = order.prizeDiamonds || '?';
+  const originOrderId = order.originOrderId || 'N/A';
+
+  const msg =
+    `🎰 <b>¡GANADOR DE RULETA! — AccessPlay</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `🏆 <b>Premio:</b> <b>${prizeDiamonds} 💎 Diamantes</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `👤 <b>Usuario:</b> ${userName}\n` +
+    `📧 <b>Contacto:</b> ${userEmail}\n` +
+    `🆔 <b>ID Juego:</b> <code>${gameId}</code>\n` +
+    `🔑 <b>UID Firebase:</b> <code>${order.userId || 'N/A'}</code>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📦 <b>Pedido origen:</b> <code>${originOrderId}</code>\n` +
+    `🎁 <b>Pedido premio:</b> <code>${order.id}</code>\n` +
+    `✅ <b>Estado:</b> Diamantes acreditados automáticamente al monedero\n` +
+    `🕐 <b>Fecha:</b> ${new Date().toLocaleString('es-VE', { timeZone: 'America/Caracas' })}`;
+
+  await botConfig.bot.sendMessage(botConfig.chatId, msg, {
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🔍 Ver en Panel Admin', url: botConfig.adminUrl }]
+      ]
+    }
+  });
+  console.log(`🎰 [AccessPlay] Notificación de ganador de ruleta enviada para #${order.id} (${prizeDiamonds} 💎)`);
+}
+
 async function autoApproveOrder(orderId, storeName, bankInfo) {
   const appInstance = storeApps[storeName];
   const botConfig = bots[storeName];
