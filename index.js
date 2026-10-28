@@ -8,6 +8,7 @@ const exifr = require('exifr');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
 
 // Variable global de apagado de emergencia
 global.isAutomationEnabled = true;
@@ -1051,18 +1052,25 @@ async function executeProcess(order, storeName, dbRef, preFetchedBuffer = null) 
         
         order.status = apiRes.status;
         order.adminNote = apiRes.dbNote;
+        if (apiRes.apiOrderId) {
+          order.apiOrderId = apiRes.apiOrderId;
+        }
         const statusHistory = order.statusHistory || [];
         statusHistory.push({
           status: apiRes.status,
           timestamp: new Date().toISOString(),
           note: apiRes.dbNote
         });
-        await dbRef.update({
+        const updateData = {
           status: apiRes.status,
           adminNote: apiRes.dbNote,
           updatedAt: new Date().toISOString(),
           statusHistory: statusHistory
-        });
+        };
+        if (apiRes.apiOrderId) {
+          updateData.apiOrderId = apiRes.apiOrderId;
+        }
+        await dbRef.update(updateData);
         
         if (apiRes.status === 'completed') {
           await applyVipRewards(order, appInstance, storeName);
@@ -1410,6 +1418,7 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
         newStatus = apiRes.status;
         buttonText = apiRes.msg;
         adminNote = apiRes.dbNote || adminNote;
+        if (apiRes.apiOrderId) orderData.apiOrderId = apiRes.apiOrderId;
       }
     } catch(e) {
       console.error(`[${storeName}] Error en API desde autoApproveOrder:`, e);
@@ -1429,12 +1438,15 @@ async function autoApproveOrder(orderId, storeName, bankInfo) {
   const statusHistory = orderData.statusHistory || [];
   statusHistory.push({ status: newStatus, timestamp: new Date().toISOString(), note: adminNote });
 
-  await dbRef.update({
+  const autoApproveUpdate = {
     status: newStatus,
     adminNote,
     updatedAt: new Date().toISOString(),
     statusHistory
-  });
+  };
+  if (orderData.apiOrderId) autoApproveUpdate.apiOrderId = orderData.apiOrderId;
+
+  await dbRef.update(autoApproveUpdate);
 
   // ── Actualizar botones de Telegram ──
   if (orderData.telegramMessageId) {
@@ -1914,6 +1926,7 @@ function startListening() {
                  
                  let newStatus = apiRes.status;
                  let newAdminNote = apiRes.dbNote;
+                 if (apiRes.apiOrderId) orderData.apiOrderId = apiRes.apiOrderId;
                  
                  if (newStatus === 'no-api') {
                      // Es un producto manual sin API. Debe ir a processing para entrega manual.
@@ -1930,12 +1943,15 @@ function startListening() {
                      note: newAdminNote
                  }];
                  
-                 await ref.child(orderId).update({
+                 const rectUpdate = {
                      status: newStatus,
                      adminNote: newAdminNote,
                      updatedAt: new Date().toISOString(),
                      statusHistory: newHistory
-                 });
+                 };
+                 if (orderData.apiOrderId) rectUpdate.apiOrderId = orderData.apiOrderId;
+                 
+                 await ref.child(orderId).update(rectUpdate);
                  // Actualizamos telegram
                  await syncTelegramStatus(orderId, orderData, store.name);
                  return; // Evitar que el resto del child_changed procese si acabamos de actualizar
@@ -1978,14 +1994,47 @@ function startListening() {
              const escapeHtml = (text) => String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
              const contactInfo = convData.contact || 'Desconocido';
              
-             const tgMsg = `💬 <b>Nuevo Mensaje de Soporte</b>\n\n<b>Contacto:</b> ${escapeHtml(contactInfo)}\n<b>Mensaje:</b> ${escapeHtml(lastMsg.text)}\n\n<i>Responde desde el Panel Admin</i>`;
-             
-             await storeConfig.bot.sendMessage(storeConfig.chatId, tgMsg, {
+             const commonOptions = {
                parse_mode: 'HTML',
                reply_markup: {
                  inline_keyboard: [[{ text: '🔍 Abrir Panel Admin', url: storeConfig.adminUrl }]]
                }
-             });
+             };
+
+             if (lastMsg.type === 'image' && lastMsg.mediaData) {
+               try {
+                 const base64Data = lastMsg.mediaData.replace(/^data:image\/\w+;base64,/, '');
+                 const imageBuffer = Buffer.from(base64Data, 'base64');
+                 const caption = `📷 <b>Nuevo Mensaje de Soporte (Foto)</b>\n\n<b>Contacto:</b> ${escapeHtml(contactInfo)}${lastMsg.text ? `\n<b>Mensaje:</b> ${escapeHtml(lastMsg.text)}` : ''}\n\n<i>Responde desde el Panel Admin</i>`;
+                 const photoOptions = { ...commonOptions, caption };
+                 await storeConfig.bot.sendPhoto(storeConfig.chatId, imageBuffer, photoOptions, {
+                   filename: 'soporte.jpg',
+                   contentType: lastMsg.mimeType || 'image/jpeg'
+                 });
+               } catch (photoErr) {
+                 console.error(`⚠️ [${store.name}] Error enviando foto a TG:`, photoErr.message);
+                 const tgMsg = `📷 <b>Nuevo Mensaje de Soporte (Foto adjunta)</b>\n\n<b>Contacto:</b> ${escapeHtml(contactInfo)}${lastMsg.text ? `\n<b>Mensaje:</b> ${escapeHtml(lastMsg.text)}` : ''}\n\n<i>(Foto visible en el Panel Admin)</i>`;
+                 await storeConfig.bot.sendMessage(storeConfig.chatId, tgMsg, commonOptions);
+               }
+             } else if (lastMsg.type === 'audio' && lastMsg.mediaData) {
+               try {
+                 const base64Data = lastMsg.mediaData.replace(/^data:audio\/\w+;base64,/, '');
+                 const audioBuffer = Buffer.from(base64Data, 'base64');
+                 const caption = `🎙️ <b>Nuevo Mensaje de Voz de Soporte (${lastMsg.duration ? lastMsg.duration + 's' : 'Audio'})</b>\n\n<b>Contacto:</b> ${escapeHtml(contactInfo)}\n\n<i>Responde desde el Panel Admin</i>`;
+                 const audioOptions = { ...commonOptions, caption };
+                 await storeConfig.bot.sendAudio(storeConfig.chatId, audioBuffer, audioOptions, {
+                   filename: 'soporte_audio.ogg',
+                   contentType: lastMsg.mimeType || 'audio/ogg'
+                 });
+               } catch (audioErr) {
+                 console.error(`⚠️ [${store.name}] Error enviando audio a TG:`, audioErr.message);
+                 const tgMsg = `🎙️ <b>Nuevo Mensaje de Voz de Soporte (${lastMsg.duration ? lastMsg.duration + 's' : 'Audio'})</b>\n\n<b>Contacto:</b> ${escapeHtml(contactInfo)}\n\n<i>(Escúchalo en el Panel Admin)</i>`;
+                 await storeConfig.bot.sendMessage(storeConfig.chatId, tgMsg, commonOptions);
+               }
+             } else {
+               const tgMsg = `💬 <b>Nuevo Mensaje de Soporte</b>\n\n<b>Contacto:</b> ${escapeHtml(contactInfo)}\n<b>Mensaje:</b> ${escapeHtml(lastMsg.text || 'Sin texto')}\n\n<i>Responde desde el Panel Admin</i>`;
+               await storeConfig.bot.sendMessage(storeConfig.chatId, tgMsg, commonOptions);
+             }
              console.log(`💬✅ [${store.name}] Notificación de soporte enviada a Telegram.`);
            }
          } catch (e) {
@@ -2921,6 +2970,7 @@ Object.keys(bots).forEach(storeName => {
                 newStatus = apiRes.status;
                 buttonText = apiRes.msg;
                 adminNote = apiRes.dbNote || adminNote;
+                if (apiRes.apiOrderId) orderData.apiOrderId = apiRes.apiOrderId;
               }
             } catch(e) { console.error(`[${storeName}] Error en API desde bot:`, e); }
           }
@@ -2929,9 +2979,11 @@ Object.keys(bots).forEach(storeName => {
           statusHistory.push({ status: newStatus, timestamp: new Date().toISOString(), note: adminNote });
 
           console.log(`[${storeName}] 💾 Actualizando BD a status:`, newStatus);
-          await dbRef.update({
+          const tgOrderUpdate = {
             status: newStatus, adminNote, updatedAt: new Date().toISOString(), statusHistory
-          });
+          };
+          if (orderData.apiOrderId) tgOrderUpdate.apiOrderId = orderData.apiOrderId;
+          await dbRef.update(tgOrderUpdate);
 
           const finalMarkup = {
             inline_keyboard: [
@@ -3021,6 +3073,28 @@ Object.keys(bots).forEach(storeName => {
   });
 });
 
+function isRecargasAmericaApi(api) {
+  if (!api) return false;
+  const baseUrl = (api.baseUrl || '').toLowerCase();
+  const name = (api.name || '').toLowerCase();
+  const mapping = api.mapping || {};
+  const authType = (mapping.authType || '').toLowerCase();
+  const provider = (mapping.provider || '').toLowerCase();
+
+  return baseUrl.includes('recargasamerica')
+    || name.includes('recargas')
+    || authType === 'bearer'
+    || provider === 'recargasamerica';
+}
+
+function getRecargasAmericaBaseUrl(api) {
+  let b = (api.baseUrl || '').trim().replace(/\/+$/, '');
+  if (!b.endsWith('/api/v1') && b.includes('panel.recargasamerica.com')) {
+    b += '/api/v1';
+  }
+  return b;
+}
+
 // Función para procesar la API de Recargas directamente desde Node.js
 async function processApiTopupFromTelegram(order, appInstance) {
   const apiConfigsSnap = await appInstance.database().ref('api_configs').once('value');
@@ -3037,6 +3111,195 @@ async function processApiTopupFromTelegram(order, appInstance) {
     return { status: 'no-api', msg: '⚠️ SIN ID DE PRODUCTO API', dbNote: 'Producto sin ID de servicio API. Requiere entrega manual.' };
   }
   
+  const isRA = isRecargasAmericaApi(api);
+
+  // ══════════════════════════════════════════════════════════
+  // CASO 1: RECARGAS AMERICAS (POST /api/v1/buy/catalog)
+  // ══════════════════════════════════════════════════════════
+  if (isRA) {
+    const cleanBaseUrl = getRecargasAmericaBaseUrl(api);
+    
+    // Idempotency-Key única y persistente en la orden (UUID v4)
+    const idempotencyKey = order.idempotencyKey || (typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${order.id}-${Date.now()}`);
+    if (!order.idempotencyKey && order.id) {
+      order.idempotencyKey = idempotencyKey;
+      appInstance.database().ref(`orders/${order.id}/idempotencyKey`).set(idempotencyKey).catch(() => {});
+    }
+
+    let playerId = '';
+    let zoneId = '';
+    if (order.gameId) {
+      if (order.productType === 'game-id-zone') {
+        const match = String(order.gameId).match(/ID:\s*(.+?)\s*\|\s*Zona:\s*(.+)/i);
+        if (match) {
+          playerId = match[1].trim();
+          zoneId = match[2].trim();
+        } else {
+          playerId = String(order.gameId).trim();
+        }
+      } else {
+        playerId = String(order.gameId).trim();
+      }
+    } else if (order.accountEmail) {
+      playerId = String(order.accountEmail).trim();
+    }
+
+    const raPayload = {
+      product_id: apiProductId,
+      quantity: 1,
+      player_id: playerId
+    };
+    if (zoneId) {
+      raPayload.zone_id = zoneId;
+    }
+
+    console.log(`[API-RA] 🚀 Enviando recarga a Recargas Americas para pedido #${order.id}:`, JSON.stringify(raPayload));
+
+    return new Promise((resolve) => {
+      const url = new URL(`${cleanBaseUrl}/buy/catalog`);
+      const postData = JSON.stringify(raPayload);
+      const options = {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${api.apiKey || ''}`,
+          'Idempotency-Key': idempotencyKey,
+          'Content-Length': Buffer.byteLength(postData)
+        },
+        timeout: 25000 // 25 segundos
+      };
+
+      const req = https.request(url, options, (res) => {
+        let dataStr = '';
+        res.on('data', chunk => dataStr += chunk);
+        res.on('end', () => {
+          let data;
+          try {
+            data = JSON.parse(dataStr);
+          } catch(e) {
+            console.error(`[API-RA] ❌ Error parseando respuesta (HTTP ${res.statusCode}):`, dataStr);
+            return resolve({
+              status: 'processing',
+              msg: '⚠️ ERROR LEYENDO RESPUESTA API',
+              dbNote: `Error parseando respuesta de Recargas Americas (HTTP ${res.statusCode}): ${dataStr.slice(0, 100)}`
+            });
+          }
+
+          console.log(`[API-RA] 📥 Respuesta de Recargas Americas (HTTP ${res.statusCode}):`, JSON.stringify(data));
+
+          if (data.success && data.data) {
+            const raData = data.data;
+            const raOrderId = raData.order_id || null;
+            const raStatus = String(raData.status || '').toUpperCase();
+
+            if (raOrderId && order.id) {
+              order.apiOrderId = raOrderId;
+              appInstance.database().ref(`orders/${order.id}/apiOrderId`).set(raOrderId).catch(() => {});
+            }
+
+            if (raStatus === 'COMPLETED') {
+              let note = 'Recarga realizada exitosamente por Recargas Americas';
+              if (raOrderId) note += ` (Ref: ${raOrderId})`;
+              if (Array.isArray(raData.delivery) && raData.delivery.length > 0) {
+                const codes = raData.delivery.map(d => {
+                  if (d.key) return `PIN: ${d.key}` + (d.serial ? ` (Serial: ${d.serial})` : '');
+                  if (d.username && d.password) return `Usuario: ${d.username} | Clave: ${d.password}`;
+                  return JSON.stringify(d);
+                }).join('\n');
+                note = `Código entregado:\n${codes}`;
+              }
+              return resolve({
+                status: 'completed',
+                apiOrderId: raOrderId,
+                msg: '✅ RECARGA EXITOSA (API)',
+                dbNote: note
+              });
+            } else if (raStatus === 'PROCESSING_API' || raStatus === 'PROCESSING_PROVIDER' || raStatus === 'QUEUED' || raStatus === 'PROCESSING') {
+              return resolve({
+                status: 'processing',
+                apiOrderId: raOrderId,
+                msg: '⏳ API PROCESANDO...',
+                dbNote: `Procesando en proveedor (${raOrderId || 'En cola'}). Esperando confirmación.`
+              });
+            } else {
+              return resolve({
+                status: 'processing',
+                apiOrderId: raOrderId,
+                msg: `⏳ API ESTADO: ${raStatus}`,
+                dbNote: `Recargas Americas estado: ${raStatus} (${raOrderId || ''})`
+              });
+            }
+          } else {
+            // Error reportado por Recargas Americas
+            const errCode = String(data.code || '').toUpperCase();
+            const errMsg = data.error || data.message || 'Error desconocido';
+            const raOrderId = data.data?.order_id || null;
+
+            if (raOrderId && order.id) {
+              order.apiOrderId = raOrderId;
+              appInstance.database().ref(`orders/${order.id}/apiOrderId`).set(raOrderId).catch(() => {});
+            }
+
+            if (errCode === 'PROVIDER_ERROR' || (data.data && data.data.needs_review)) {
+              return resolve({
+                status: 'processing',
+                apiOrderId: raOrderId,
+                msg: '⏳ EN REVISIÓN (Proveedor)',
+                dbNote: `Recargas Americas: Orden en revisión por el proveedor (${raOrderId || 'Sin ID'}). ${errMsg}`
+              });
+            } else if (errCode === 'DUPLICATE_REQUEST' || res.statusCode === 409) {
+              return resolve({
+                status: 'processing',
+                apiOrderId: raOrderId,
+                msg: '⏳ YA REGISTRADA (409)',
+                dbNote: `Recargas Americas: Solicitud ya aceptada previamente (${raOrderId || order.id}). Consultando estado.`
+              });
+            } else if (errCode === 'PURCHASE_FAILED' || errMsg.toLowerCase().includes('saldo')) {
+              return resolve({
+                status: 'processing',
+                msg: '⚠️ PAUSADO: Sin Saldo API',
+                dbNote: `Recargas Americas: Saldo insuficiente en billetera del proveedor. (${errMsg})`
+              });
+            } else if (errCode === 'IP_NOT_ALLOWED' || res.statusCode === 403) {
+              return resolve({
+                status: 'processing',
+                msg: '⚠️ IP NO PERMITIDA',
+                dbNote: `Recargas Americas: ${errMsg} (IP: ${data.ip || 'desconocida'}). Agrega la IP en panel de Recargas Americas.`
+              });
+            } else if (errCode === 'MISSING_FIELD' || errCode === 'PRODUCT_INACTIVE' || errCode === 'NOT_FOUND') {
+              return resolve({
+                status: 'invalid-id',
+                msg: `❌ RECHAZADO API: ${errCode}`,
+                dbNote: `Recargas Americas rechazó: ${errMsg}`
+              });
+            } else {
+              return resolve({
+                status: 'processing',
+                msg: `⚠️ ERROR API (${errCode || res.statusCode})`,
+                dbNote: `Recargas Americas (${errCode || res.statusCode}): ${errMsg}`
+              });
+            }
+          }
+        });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ status: 'processing', msg: '⏳ TIMEOUT API', dbNote: 'Recargas Americas tardó demasiado. Requiere verificación de estado.' });
+      });
+
+      req.on('error', (e) => {
+        resolve({ status: 'processing', msg: '⚠️ API CAÍDA', dbNote: `Fallo de conexión con Recargas Americas: ${e.message}` });
+      });
+
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // CASO 2: TIENDAGIFTVEN Y OTRAS APIS LEGACY (POST /comprar)
+  // ══════════════════════════════════════════════════════════
   const baseUrl = api.baseUrl.endsWith('/') ? api.baseUrl.slice(0, -1) : api.baseUrl;
   const rectificationCount = (order.statusHistory || []).filter(h => h.note && h.note.includes('rectificó')).length;
   const finalMerchantRef = rectificationCount > 0 ? `${order.id}_R${rectificationCount}` : order.id;
@@ -3229,15 +3492,139 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
   
   activePolls.add(orderId);
   const api = apiConfigs[apiIdx];
-  const baseUrl = api.baseUrl.endsWith('/') ? api.baseUrl.slice(0, -1) : api.baseUrl;
   const botConfig = bots[storeName];
+  const dbRef = appInstance.database().ref('orders/' + orderId);
 
+  const isRA = isRecargasAmericaApi(api);
+
+  // ══════════════════════════════════════════════════════════
+  // POLLING RECARGAS AMERICAS (GET /api/v1/catalog/orders/{order_id})
+  // ══════════════════════════════════════════════════════════
+  if (isRA) {
+    let apiOrderId = orderData.apiOrderId;
+    if (!apiOrderId) {
+      const snap = await dbRef.child('apiOrderId').once('value');
+      if (snap.exists()) {
+        apiOrderId = snap.val();
+        orderData.apiOrderId = apiOrderId;
+      }
+    }
+
+    if (!apiOrderId) {
+      console.warn(`[${storeName}] ⚠️ Pedido #${orderId} de Recargas Americas no tiene apiOrderId para consultar. Cancelando polling.`);
+      activePolls.delete(orderId);
+      return;
+    }
+
+    const cleanBaseUrl = getRecargasAmericaBaseUrl(api);
+    let attempts = 0;
+    const maxRaAttempts = 30; // 30 intentos * 10s = 300s (5 minutos)
+
+    console.log(`[${storeName}] 🔄 Iniciando polling en Recargas Americas para orden #${orderId} (Ref: ${apiOrderId})...`);
+
+    const pollInterval = setInterval(async () => {
+      attempts++;
+      try {
+        const pollUrl = new URL(`${cleanBaseUrl}/catalog/orders/${encodeURIComponent(apiOrderId)}`);
+        const options = {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${api.apiKey || ''}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        };
+
+        const req = https.request(pollUrl, options, (res) => {
+          let dataStr = '';
+          res.on('data', chunk => dataStr += chunk);
+          res.on('end', async () => {
+            try {
+              const pollData = JSON.parse(dataStr);
+              if (pollData.success && pollData.data) {
+                const status = String(pollData.data.status || '').toUpperCase();
+                console.log(`[${storeName}] 🔄 Recargas Americas #${orderId} (${apiOrderId}) -> Estado: ${status} (Intento ${attempts}/${maxRaAttempts})`);
+
+                if (status === 'COMPLETED') {
+                  clearInterval(pollInterval);
+                  activePolls.delete(orderId);
+
+                  let note = `Recarga completada y confirmada por Recargas Americas (Ref: ${apiOrderId})`;
+                  if (Array.isArray(pollData.data.delivery) && pollData.data.delivery.length > 0) {
+                    const codes = pollData.data.delivery.map(d => {
+                      if (d.key) return `PIN: ${d.key}` + (d.serial ? ` (Serial: ${d.serial})` : '');
+                      if (d.username && d.password) return `Usuario: ${d.username} | Clave: ${d.password}`;
+                      return JSON.stringify(d);
+                    }).join('\n');
+                    note = `Código entregado:\n${codes}`;
+                  }
+                  await updateOrderAndTelegram(dbRef, 'completed', note, '✅ APROBADO Y COMPLETADO', botConfig, chatId, messageId, storeName, orderId);
+
+                } else if (status === 'REFUNDED_API_ERROR' || status === 'REFUNDED') {
+                  clearInterval(pollInterval);
+                  activePolls.delete(orderId);
+                  await updateOrderAndTelegram(dbRef, 'rejected', `Recargas Americas: Proveedor canceló la recarga y devolvió el saldo (${apiOrderId}).`, '❌ REEMBOLSADO API', botConfig, chatId, messageId, storeName, orderId);
+
+                } else if (status === 'PROCESSING_API' || status === 'PROCESSING_PROVIDER' || status === 'QUEUED' || status === 'PROCESSING' || pollData.data.needs_review) {
+                  if (attempts >= maxRaAttempts) {
+                    clearInterval(pollInterval);
+                    activePolls.delete(orderId);
+                    await updateOrderAndTelegram(dbRef, 'processing', `Recargas Americas sigue procesando la orden ${apiOrderId} tras 5 minutos. Requiere verificación manual.`, '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
+                  }
+                } else {
+                  if (attempts >= maxRaAttempts) {
+                    clearInterval(pollInterval);
+                    activePolls.delete(orderId);
+                    await updateOrderAndTelegram(dbRef, 'processing', `Recargas Americas estado ${status} tras 5 min (${apiOrderId}).`, '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
+                  }
+                }
+              } else {
+                console.warn(`[${storeName}] ⚠️ Recargas Americas polling error #${orderId}:`, pollData);
+                if (attempts >= maxRaAttempts) {
+                  clearInterval(pollInterval);
+                  activePolls.delete(orderId);
+                  await updateOrderAndTelegram(dbRef, 'processing', `Error consultando Recargas Americas (${apiOrderId}): ${pollData.error || 'Respuesta fallida'}`, '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
+                }
+              }
+            } catch (errParse) {
+              console.error(`[${storeName}] Error parseando JSON en polling RA para #${orderId}:`, errParse);
+              if (attempts >= maxRaAttempts) {
+                clearInterval(pollInterval);
+                activePolls.delete(orderId);
+                await updateOrderAndTelegram(dbRef, 'processing', `Error de respuesta en Recargas Americas tras 5 min (${apiOrderId}).`, '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
+              }
+            }
+          });
+        });
+
+        req.on('error', (e) => {
+          console.error(`[${storeName}] Error de red en polling RA para #${orderId}:`, e.message);
+          if (attempts >= maxRaAttempts) {
+            clearInterval(pollInterval);
+            activePolls.delete(orderId);
+            updateOrderAndTelegram(dbRef, 'processing', `Fallo de red consultando Recargas Americas (${apiOrderId}).`, '⚠️ ERROR RED', botConfig, chatId, messageId, storeName, orderId).catch(console.error);
+          }
+        });
+        req.end();
+      } catch (e) {
+        if (attempts >= maxRaAttempts) {
+          clearInterval(pollInterval);
+          activePolls.delete(orderId);
+        }
+      }
+    }, 10000);
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // POLLING TIENDAGIFTVEN Y OTRAS (GET /recargas/status?...)
+  // ══════════════════════════════════════════════════════════
+  const baseUrl = api.baseUrl.endsWith('/') ? api.baseUrl.slice(0, -1) : api.baseUrl;
   const rectificationCount = (orderData.statusHistory || []).filter(h => h.note && h.note.includes('rectificó')).length;
   const finalMerchantRef = rectificationCount > 0 ? `${orderId}_R${rectificationCount}` : orderId;
 
   let attempts = 0;
   const maxAttempts = 60; // 60 * 5 = 300 seconds (5 minutos)
-  const dbRef = appInstance.database().ref('orders/' + orderId);
 
   const pollInterval = setInterval(async () => {
     attempts++;
