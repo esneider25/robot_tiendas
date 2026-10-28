@@ -93,39 +93,41 @@ const bots = {
 console.log('✅ Bots de Telegram configurados.');
 
 // ========================================
-// 3.5 VIP CASHBACK & PUNTOS (Replica de data.js para el bot)
+// 3.5 VIP DESCUENTOS & PUNTOS (Replica de data.js para el bot)
 // ========================================
+// NOTA: El cashback fue reemplazado por REBAJAS DIRECTAS en tienda según nivel VIP.
+// El robot ya no entrega saldo de cashback, solo acumula totalSpent y asigna AccessPoints.
 const VIP_TIERS = [
-  { max: 1, name: 'Novato', cashback: 0 },
-  { max: 20, name: 'BRONCE I', cashback: 0.2 },
-  { max: 40, name: 'BRONCE II', cashback: 0.4 },
-  { max: 60, name: 'BRONCE III', cashback: 0.6 },
-  { max: 80, name: 'BRONCE IV', cashback: 0.8 },
-  { max: 100, name: 'BRONCE V', cashback: 1.0 },
-  { max: 120, name: 'PLATA I', cashback: 1.2 },
-  { max: 140, name: 'PLATA II', cashback: 1.4 },
-  { max: 160, name: 'PLATA III', cashback: 1.6 },
-  { max: 180, name: 'PLATA IV', cashback: 1.8 },
-  { max: 200, name: 'PLATA V', cashback: 2.0 },
-  { max: 220, name: 'ORO I', cashback: 2.2 },
-  { max: 240, name: 'ORO II', cashback: 2.4 },
-  { max: 260, name: 'ORO III', cashback: 2.6 },
-  { max: 280, name: 'ORO IV', cashback: 2.8 },
-  { max: 300, name: 'ORO V', cashback: 3.0 },
-  { max: 320, name: 'DIAMANTE I', cashback: 3.2 },
-  { max: 340, name: 'DIAMANTE II', cashback: 3.4 },
-  { max: 360, name: 'DIAMANTE III', cashback: 3.6 },
-  { max: 380, name: 'DIAMANTE IV', cashback: 3.8 },
-  { max: Infinity, name: 'DIAMANTE V', cashback: 4.0 }
+  { max: 1, name: 'Novato', discount: 0, cashback: 0 },
+  { max: 20, name: 'BRONCE I', discount: 0.2, cashback: 0 },
+  { max: 40, name: 'BRONCE II', discount: 0.4, cashback: 0 },
+  { max: 60, name: 'BRONCE III', discount: 0.6, cashback: 0 },
+  { max: 80, name: 'BRONCE IV', discount: 0.8, cashback: 0 },
+  { max: 100, name: 'BRONCE V', discount: 1.0, cashback: 0 },
+  { max: 120, name: 'PLATA I', discount: 1.2, cashback: 0 },
+  { max: 140, name: 'PLATA II', discount: 1.4, cashback: 0 },
+  { max: 160, name: 'PLATA III', discount: 1.6, cashback: 0 },
+  { max: 180, name: 'PLATA IV', discount: 1.8, cashback: 0 },
+  { max: 200, name: 'PLATA V', discount: 2.0, cashback: 0 },
+  { max: 220, name: 'ORO I', discount: 2.2, cashback: 0 },
+  { max: 240, name: 'ORO II', discount: 2.4, cashback: 0 },
+  { max: 260, name: 'ORO III', discount: 2.6, cashback: 0 },
+  { max: 280, name: 'ORO IV', discount: 2.8, cashback: 0 },
+  { max: 300, name: 'ORO V', discount: 3.0, cashback: 0 },
+  { max: 320, name: 'DIAMANTE I', discount: 3.2, cashback: 0 },
+  { max: 340, name: 'DIAMANTE II', discount: 3.4, cashback: 0 },
+  { max: 360, name: 'DIAMANTE III', discount: 3.6, cashback: 0 },
+  { max: 380, name: 'DIAMANTE IV', discount: 3.8, cashback: 0 },
+  { max: Infinity, name: 'DIAMANTE V', discount: 4.0, cashback: 0 }
 ];
 
 function getVipLevel(spent) {
   for (let i = 0; i < VIP_TIERS.length; i++) {
     if (spent < VIP_TIERS[i].max) {
-      return { name: VIP_TIERS[i].name, cashback: VIP_TIERS[i].cashback };
+      return { name: VIP_TIERS[i].name, discount: VIP_TIERS[i].discount, cashback: 0 };
     }
   }
-  return { name: 'DIAMANTE V', cashback: 4.0 };
+  return { name: 'DIAMANTE V', discount: 4.0, cashback: 0 };
 }
 
 /**
@@ -149,54 +151,30 @@ async function applyVipRewards(orderData, appInstance, storeName) {
     const role = userData.role || 'cliente';
     if (role === 'revendedor') return;
 
-    // 1. Calcular puntos
+    // 1. Calcular puntos AccessPoints
     let earnedPoints = 0;
     if (price < 5) earnedPoints = 2;
     else if (price <= 12) earnedPoints = 4;
     else earnedPoints = 7;
 
-    // 2. Calcular nuevo totalSpent y cashback
+    // 2. Calcular nuevo totalSpent (para progreso de nivel VIP)
     const currentSpent = parseFloat(userData.totalSpent || 0);
     const newSpent = currentSpent + price;
 
-    let cashbackAmount = 0;
-    let cashbackPercent = 0;
+    // NOTA: El cashback al monedero está DESACTIVADO.
+    // La rebaja ahora se aplica directamente sobre el precio en tienda al momento de la compra.
 
-    // Solo dar cashback si NO se usó código de descuento
-    if (!orderData.discountCode) {
-      const vip = getVipLevel(newSpent);
-      cashbackPercent = vip.cashback || 0;
-      if (cashbackPercent > 0) {
-        cashbackAmount = price * (cashbackPercent / 100);
-      }
-    }
-
-    // 3. Aplicar todo con transacción atómica para evitar race conditions
+    // 3. Aplicar puntos y totalSpent con transacción atómica
     await userRef.transaction(current => {
       if (current === null) return current;
 
       current.totalSpent = (parseFloat(current.totalSpent) || 0) + price;
       current.points = (current.points || 0) + earnedPoints;
 
-      if (cashbackAmount > 0) {
-        current.wallet = (parseFloat(current.wallet) || 0) + cashbackAmount;
-      }
-
       return current;
     });
 
-    // 4. Registrar la transacción de cashback en el historial (fuera de la transacción)
-    if (cashbackAmount > 0) {
-      await appInstance.database().ref('users/' + orderData.userId + '/transactions').push({
-        id: Date.now().toString(),
-        type: 'deposit',
-        amount: cashbackAmount,
-        description: `Cashback VIP (${cashbackPercent.toFixed(1)}%) por pedido #${orderData.id}`,
-        date: Date.now()
-      });
-    }
-
-    console.log(`🎯 [${storeName}] VIP aplicado a ${orderData.userId}: +${earnedPoints} PTS, totalSpent=$${newSpent.toFixed(2)}${cashbackAmount > 0 ? `, cashback=$${cashbackAmount.toFixed(4)}` : ''}`);
+    console.log(`🎯 [${storeName}] VIP progreso aplicado a ${orderData.userId}: +${earnedPoints} PTS, nuevo totalSpent=$${newSpent.toFixed(2)} (Cashback desactivado - Descuento directo en tienda)`);
 
     // 5. Lógica de Comisión para Influencers
     if (orderData.discountCode) {
