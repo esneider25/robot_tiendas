@@ -2923,7 +2923,7 @@ Object.keys(bots).forEach(storeName => {
           console.log(`[${storeName}] ✅ Procesando aprobación para:`, orderId);
           let newStatus = 'completed';
           let buttonText = '✅ PEDIDO APROBADO';
-          let adminNote = 'Pedido realizado exitosamente';
+          let adminNote = 'Recarga exitosa';
 
           // Mostrar botón de cargando mientras procesa la API (solo si tiene apiProvider)
           const hasApi = orderData.apiProvider !== undefined && orderData.apiProvider !== null && orderData.apiProvider !== '' && orderData.apiProductId !== undefined && orderData.apiProductId !== null && orderData.apiProductId !== '';
@@ -2943,7 +2943,7 @@ Object.keys(bots).forEach(storeName => {
                 // Admin aprobó manualmente un producto sin API válida → completar directamente
                 newStatus = 'completed';
                 buttonText = '✅ PEDIDO APROBADO';
-                adminNote = 'Pedido realizado exitosamente (aprobado manualmente)';
+                adminNote = 'Recarga exitosa';
               } else {
                 newStatus = apiRes.status;
                 buttonText = apiRes.msg;
@@ -3159,7 +3159,7 @@ async function processApiTopupFromTelegram(order, appInstance) {
             return resolve({
               status: 'processing',
               msg: '⚠️ ERROR LEYENDO RESPUESTA API',
-              dbNote: `Error parseando respuesta de Recargas Americas (HTTP ${res.statusCode}): ${dataStr.slice(0, 100)}`
+              dbNote: 'Error procesando recarga automática. Requiere revisión manual.'
             });
           }
 
@@ -3176,8 +3176,7 @@ async function processApiTopupFromTelegram(order, appInstance) {
             }
 
             if (raStatus === 'COMPLETED') {
-              let note = 'Recarga realizada exitosamente por Recargas Americas';
-              if (raOrderId) note += ` (Ref: ${raOrderId})`;
+              let note = 'Recarga exitosa';
               if (Array.isArray(raData.delivery) && raData.delivery.length > 0) {
                 const codes = raData.delivery.map(d => {
                   if (d.key) return `PIN: ${d.key}` + (d.serial ? ` (Serial: ${d.serial})` : '');
@@ -3197,14 +3196,14 @@ async function processApiTopupFromTelegram(order, appInstance) {
                 status: 'processing',
                 apiOrderId: raOrderId,
                 msg: '⏳ API PROCESANDO...',
-                dbNote: `Procesando en proveedor (${raOrderId || 'En cola'}). Esperando confirmación.`
+                dbNote: 'Procesando recarga automática. Esperando confirmación...'
               });
             } else {
               return resolve({
                 status: 'processing',
                 apiOrderId: raOrderId,
                 msg: `⏳ API ESTADO: ${raStatus}`,
-                dbNote: `Recargas Americas estado: ${raStatus} (${raOrderId || ''})`
+                dbNote: 'Procesando recarga automática...'
               });
             }
           } else {
@@ -3223,38 +3222,46 @@ async function processApiTopupFromTelegram(order, appInstance) {
                 status: 'processing',
                 apiOrderId: raOrderId,
                 msg: '⏳ EN REVISIÓN (Proveedor)',
-                dbNote: `Recargas Americas: Orden en revisión por el proveedor (${raOrderId || 'Sin ID'}). ${errMsg}`
+                dbNote: 'Orden en revisión por el sistema. Esperando confirmación...'
               });
             } else if (errCode === 'DUPLICATE_REQUEST' || res.statusCode === 409) {
               return resolve({
                 status: 'processing',
                 apiOrderId: raOrderId,
                 msg: '⏳ YA REGISTRADA (409)',
-                dbNote: `Recargas Americas: Solicitud ya aceptada previamente (${raOrderId || order.id}). Consultando estado.`
+                dbNote: 'Solicitud ya registrada previamente. Consultando estado...'
               });
             } else if (errCode === 'PURCHASE_FAILED' || errMsg.toLowerCase().includes('saldo')) {
               return resolve({
                 status: 'processing',
                 msg: '⚠️ PAUSADO: Sin Saldo API',
-                dbNote: `Recargas Americas: Saldo insuficiente en billetera del proveedor. (${errMsg})`
+                dbNote: 'El sistema se encuentra en mantenimiento temporal. Requiere revisión manual.'
               });
             } else if (errCode === 'IP_NOT_ALLOWED' || res.statusCode === 403) {
               return resolve({
                 status: 'processing',
                 msg: '⚠️ IP NO PERMITIDA',
-                dbNote: `Recargas Americas: ${errMsg} (IP: ${data.ip || 'desconocida'}). Agrega la IP en panel de Recargas Americas.`
+                dbNote: 'Error de configuración del sistema. Requiere revisión manual.'
               });
-            } else if (errCode === 'MISSING_FIELD' || errCode === 'PRODUCT_INACTIVE' || errCode === 'NOT_FOUND') {
+            } else if (errCode === 'MISSING_FIELD' || errCode === 'PRODUCT_INACTIVE' || errCode === 'NOT_FOUND' || errCode === 'INVALID_PLAYER' || errCode === 'INVALID_ACCOUNT' || errCode === 'REJECTED') {
               return resolve({
                 status: 'invalid-id',
                 msg: `❌ RECHAZADO API: ${errCode}`,
-                dbNote: `Recargas Americas rechazó: ${errMsg}`
+                dbNote: 'El ID de jugador no existe o está mal escrito.'
               });
             } else {
+              const isAccountError = /id|cuenta|player|jugador|not found|invalido|inválido|no existe|cancel|rechaz/i.test(errMsg);
+              if (isAccountError) {
+                return resolve({
+                  status: 'invalid-id',
+                  msg: `❌ RECHAZADO API: ${errCode || res.statusCode}`,
+                  dbNote: 'El ID de jugador no existe o está mal escrito.'
+                });
+              }
               return resolve({
                 status: 'processing',
                 msg: `⚠️ ERROR API (${errCode || res.statusCode})`,
-                dbNote: `Recargas Americas (${errCode || res.statusCode}): ${errMsg}`
+                dbNote: 'Error procesando recarga automatizada. Requiere revisión manual.'
               });
             }
           }
@@ -3263,11 +3270,11 @@ async function processApiTopupFromTelegram(order, appInstance) {
 
       req.on('timeout', () => {
         req.destroy();
-        resolve({ status: 'processing', msg: '⏳ TIMEOUT API', dbNote: 'Recargas Americas tardó demasiado. Requiere verificación de estado.' });
+        resolve({ status: 'processing', msg: '⏳ TIMEOUT API', dbNote: 'El sistema tardó demasiado en responder. Requiere verificación de estado.' });
       });
 
       req.on('error', (e) => {
-        resolve({ status: 'processing', msg: '⚠️ API CAÍDA', dbNote: `Fallo de conexión con Recargas Americas: ${e.message}` });
+        resolve({ status: 'processing', msg: '⚠️ API CAÍDA', dbNote: 'Fallo de conexión temporal con el sistema de recargas.' });
       });
 
       req.write(postData);
@@ -3320,7 +3327,7 @@ async function processApiTopupFromTelegram(order, appInstance) {
         try {
           const data = JSON.parse(dataStr);
           if (data.ok && data.estado === 'completado') {
-             let note = 'Pedido realizado exitosamente';
+             let note = 'Recarga exitosa';
              if (data.codigo) note = 'Código entregado: ' + data.codigo;
              if (data.codigos && data.codigos.length > 0) note = 'Códigos entregados:\n' + data.codigos.join('\n');
              resolve({ status: 'completed', msg: '✅ RECARGA EXITOSA (API)', dbNote: note });
@@ -3329,11 +3336,11 @@ async function processApiTopupFromTelegram(order, appInstance) {
           } else {
              const errorStr = (data.error || '').toLowerCase();
              if (errorStr.includes('ya fue usado') || errorStr.includes('already used')) {
-                resolve({ status: 'completed', msg: '✅ APROBADO (Ya usado)', dbNote: 'Pedido realizado exitosamente' });
+                resolve({ status: 'completed', msg: '✅ APROBADO (Ya usado)', dbNote: 'Recarga exitosa' });
              } else if (errorStr.includes('saldo') || errorStr.includes('balance') || errorStr.includes('pin') || errorStr.includes('stock')) {
-                resolve({ status: 'processing', msg: '⚠️ PAUSADO: Sin Saldo/Stock', dbNote: `TiendaGiftVen: ${data.error}` });
+                resolve({ status: 'processing', msg: '⚠️ PAUSADO: Sin Saldo/Stock', dbNote: 'El sistema se encuentra en mantenimiento temporal. Requiere revisión manual.' });
              } else {
-                resolve({ status: 'invalid-id', msg: `❌ RECHAZADO API: ${data.error}`, dbNote: `ID Invalido: ${data.error}` });
+                resolve({ status: 'invalid-id', msg: `❌ RECHAZADO API: ${data.error}`, dbNote: 'El ID de jugador no existe o está mal escrito.' });
              }
           }
         } catch(e) {
@@ -3527,7 +3534,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
                   clearInterval(pollInterval);
                   activePolls.delete(orderId);
 
-                  let note = `Recarga completada y confirmada por Recargas Americas (Ref: ${apiOrderId})`;
+                  let note = 'Recarga exitosa';
                   if (Array.isArray(pollData.data.delivery) && pollData.data.delivery.length > 0) {
                     const codes = pollData.data.delivery.map(d => {
                       if (d.key) return `PIN: ${d.key}` + (d.serial ? ` (Serial: ${d.serial})` : '');
@@ -3538,22 +3545,23 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
                   }
                   await updateOrderAndTelegram(dbRef, 'completed', note, '✅ APROBADO Y COMPLETADO', botConfig, chatId, messageId, storeName, orderId);
 
-                } else if (status === 'REFUNDED_API_ERROR' || status === 'REFUNDED') {
+                } else if (status === 'REFUNDED_API_ERROR' || status === 'REFUNDED' || status === 'CANCELLED' || status === 'REJECTED' || status === 'FAILED') {
                   clearInterval(pollInterval);
                   activePolls.delete(orderId);
-                  await updateOrderAndTelegram(dbRef, 'rejected', `Recargas Americas: Proveedor canceló la recarga y devolvió el saldo (${apiOrderId}).`, '❌ REEMBOLSADO API', botConfig, chatId, messageId, storeName, orderId);
+                  console.log(`[${storeName}] ⚠️ Recargas Americas canceló/reembolsó #${orderId} (${apiOrderId}). Marcando como ID Inválido con nota estándar.`);
+                  await updateOrderAndTelegram(dbRef, 'invalid-id', 'El ID de jugador no existe o está mal escrito.', '⚠️ ID INVÁLIDO (API)', botConfig, chatId, messageId, storeName, orderId);
 
                 } else if (status === 'PROCESSING_API' || status === 'PROCESSING_PROVIDER' || status === 'QUEUED' || status === 'PROCESSING' || pollData.data.needs_review) {
                   if (attempts >= maxRaAttempts) {
                     clearInterval(pollInterval);
                     activePolls.delete(orderId);
-                    await updateOrderAndTelegram(dbRef, 'processing', `Recargas Americas sigue procesando la orden ${apiOrderId} tras 5 minutos. Requiere verificación manual.`, '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
+                    await updateOrderAndTelegram(dbRef, 'processing', 'El pedido sigue procesándose en el sistema. Requiere verificación manual.', '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
                   }
                 } else {
                   if (attempts >= maxRaAttempts) {
                     clearInterval(pollInterval);
                     activePolls.delete(orderId);
-                    await updateOrderAndTelegram(dbRef, 'processing', `Recargas Americas estado ${status} tras 5 min (${apiOrderId}).`, '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
+                    await updateOrderAndTelegram(dbRef, 'processing', 'El pedido sigue procesándose en el sistema.', '⚠️ PROCESANDO (Timeout)', botConfig, chatId, messageId, storeName, orderId);
                   }
                 }
               } else {
@@ -3561,7 +3569,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
                 if (attempts >= maxRaAttempts) {
                   clearInterval(pollInterval);
                   activePolls.delete(orderId);
-                  await updateOrderAndTelegram(dbRef, 'processing', `Error consultando Recargas Americas (${apiOrderId}): ${pollData.error || 'Respuesta fallida'}`, '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
+                  await updateOrderAndTelegram(dbRef, 'processing', 'El pedido está en revisión en el sistema.', '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
                 }
               }
             } catch (errParse) {
@@ -3569,7 +3577,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
               if (attempts >= maxRaAttempts) {
                 clearInterval(pollInterval);
                 activePolls.delete(orderId);
-                await updateOrderAndTelegram(dbRef, 'processing', `Error de respuesta en Recargas Americas tras 5 min (${apiOrderId}).`, '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
+                await updateOrderAndTelegram(dbRef, 'processing', 'El pedido está en revisión en el sistema.', '⚠️ ERROR API (Manual)', botConfig, chatId, messageId, storeName, orderId);
               }
             }
           });
@@ -3580,7 +3588,7 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
           if (attempts >= maxRaAttempts) {
             clearInterval(pollInterval);
             activePolls.delete(orderId);
-            updateOrderAndTelegram(dbRef, 'processing', `Fallo de red consultando Recargas Americas (${apiOrderId}).`, '⚠️ ERROR RED', botConfig, chatId, messageId, storeName, orderId).catch(console.error);
+            updateOrderAndTelegram(dbRef, 'processing', 'Fallo de red temporal en el sistema de recargas.', '⚠️ ERROR RED', botConfig, chatId, messageId, storeName, orderId).catch(console.error);
           }
         });
         req.end();
@@ -3642,20 +3650,18 @@ async function pollApiStatus(orderId, orderData, appInstance, storeName, chatId,
               let errorMsg = pollData.error || pollData.msg || pollData.estado || 'Rechazado';
               const errorLower = String(errorMsg).toLowerCase();
               if (errorLower.includes('ya fue usado') || errorLower.includes('already used')) {
-                await updateOrderAndTelegram(dbRef, 'completed', `Aprobado forzadamente (API indicó: ${errorMsg})`, '✅ APROBADO (Ya usado)', botConfig, chatId, messageId, storeName, orderId);
+                await updateOrderAndTelegram(dbRef, 'completed', 'Recarga exitosa', '✅ APROBADO (Ya usado)', botConfig, chatId, messageId, storeName, orderId);
               } else {
-                let clientNote = 'ID Inválido o producto no disponible';
+                let clientNote = 'El ID de jugador no existe o está mal escrito.';
                 if (errorLower.includes('saldo') || errorLower.includes('balance') || errorLower.includes('pin') || errorLower.includes('stock')) {
-                    clientNote = 'El proveedor se quedó sin saldo o stock. Revisión manual requerida.';
+                    clientNote = 'El sistema se encuentra en mantenimiento temporal. Requiere revisión manual.';
                     await updateOrderAndTelegram(dbRef, 'processing', clientNote, `⚠️ PAUSADO: Sin Saldo/Stock`, botConfig, chatId, messageId, storeName, orderId);
                     
                     // Alerta admin
-                    const alertMsg = `⚠️ <b>ALERTA DE FONDOS / STOCK</b> ⚠️\n\nEl pedido #${orderId} no pudo ser procesado porque TiendaGiftVen indicó falta de saldo o pines.\n\n<b>Error:</b> ${errorMsg}\n\nEl pedido quedó en "PROCESANDO". Complétalo manualmente.`;
+                    const alertMsg = `⚠️ <b>ALERTA DE FONDOS / STOCK</b> ⚠️\n\nEl pedido #${orderId} no pudo ser procesado porque el proveedor indicó falta de saldo o pines.\n\n<b>Error:</b> ${errorMsg}\n\nEl pedido quedó en "PROCESANDO". Complétalo manualmente.`;
                     await botConfig.bot.sendMessage(botConfig.chatId, alertMsg, { parse_mode: 'HTML' });
                 } else {
-                    if (errorLower.includes('id') || errorLower.includes('cuenta') || errorLower.includes('jugador') || errorLower.includes('not found')) {
-                        clientNote = 'Verifica que el ID o la cuenta sean correctos.';
-                    }
+                    clientNote = 'El ID de jugador no existe o está mal escrito.';
                     await updateOrderAndTelegram(dbRef, 'invalid-id', clientNote, `❌ RECHAZADO API: ${errorMsg}`, botConfig, chatId, messageId, storeName, orderId);
                 }
               }
